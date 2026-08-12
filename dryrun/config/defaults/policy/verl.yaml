@@ -1,0 +1,4 @@
+name: verl
+staleness_threshold: 0.1
+trigger_parameter_sync_step: 4
+require_batches: 1

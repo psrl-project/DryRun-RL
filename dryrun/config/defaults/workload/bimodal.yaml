@@ -1,0 +1,6 @@
+name: bimodal
+n: 200
+seed: 42
+short_len: 50
+long_len: 500
+long_frac: 0.25

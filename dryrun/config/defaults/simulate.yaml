@@ -1,0 +1,27 @@
+defaults:
+  - _self_
+  - cost_model: roofline
+  - policy: psrl
+  - workload: uniform
+  - train_cost: fixed
+
+batch_size: 8
+max_staleness: 2
+n_versions: 20
+partial_rollout: true
+token_budget: 8192
+kv_blocks: 100000
+block_size: 16
+n_instances: 1
+prompt_len: 512
+livelock_rounds: 50
+max_engine_iters: 10000
+output_dir: outputs
+
+sync_cost:
+  name: fixed
+  sync_time: 0.0
+
+recompute_cost:
+  name: fixed
+  time_per_token: 0.0

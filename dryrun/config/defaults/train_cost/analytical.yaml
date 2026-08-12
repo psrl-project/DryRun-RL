@@ -1,0 +1,5 @@
+name: analytical
+model_params: 8000000000
+peak_flops: 312.0e12
+memory_bandwidth: 2.0e12
+overhead_factor: 1.1

@@ -1,0 +1,6 @@
+name: powerlaw
+n: 200
+seed: 42
+alpha: 2.0
+lo: 10
+hi: 1000

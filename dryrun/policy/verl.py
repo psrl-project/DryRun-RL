@@ -1,0 +1,89 @@
+"""verl fully async staleness policy."""
+
+from __future__ import annotations
+
+from collections import deque
+
+from .base import CompleteAction, SimState, StalenessPolicy
+from ..core.types import Request
+
+
+class VerlPolicy(StalenessPolicy):
+    """
+    verl's fully async policy with window-based admission and bounded queue.
+
+    staleness_threshold is a float sample-overage ratio (not a version count).
+    The window resets at every weight sync. The hand-off queue drops oldest
+    on overflow.
+    """
+
+    name = "verl"
+
+    def __init__(
+        self,
+        staleness_threshold: float = 0.1,
+        trigger_parameter_sync_step: int = 4,
+        require_batches: int = 1,
+        max_concurrent: int | None = None,
+    ):
+        self.threshold = staleness_threshold
+        self.sync_step = trigger_parameter_sync_step
+        self.require_batches = require_batches
+        self.max_concurrent = max_concurrent
+
+        self.staleness_samples = 0
+        self.local_trigger_step = 1
+        self.queue: deque = deque()
+        self.max_queue_size = 1
+        self.max_required = 1
+        self.dropped = 0
+        self._configured = False
+
+    def _configure(self, st: SimState) -> None:
+        required = st.batch_size * self.require_batches
+        self.max_required = int(required * (self.threshold + 1) * self.sync_step)
+        self.max_queue_size = self.max_required
+        self.queue = deque(self.queue, maxlen=self.max_queue_size)
+        self._configured = True
+
+    def admit_quota(self, st: SimState) -> int:
+        if not self._configured:
+            self._configure(st)
+        if len(self.queue) >= self.max_queue_size:
+            return 0
+        if self.staleness_samples >= self.max_required:
+            return 0
+        room = self.max_required - self.staleness_samples
+        if self.max_concurrent is not None:
+            room = min(room, self.max_concurrent - len(st.inflight))
+        return max(0, room)
+
+    def on_admit(self, req: Request, st: SimState) -> None:
+        self.staleness_samples += 1
+
+    def on_complete(self, req: Request, st: SimState) -> CompleteAction:
+        if not self._configured:
+            self._configure(st)
+        if len(self.queue) >= self.max_queue_size:
+            self.dropped += 1
+            return CompleteAction.DROP
+        self.queue.append(req)
+        return CompleteAction.KEEP
+
+    def select_batch(self, st: SimState) -> list[Request] | None:
+        required = st.batch_size * self.require_batches
+        if len(self.queue) < required:
+            return None
+        return [self.queue.popleft() for _ in range(required)]
+
+    def on_version_advance(self, version: int, st: SimState) -> None:
+        if self.local_trigger_step < self.sync_step:
+            self.local_trigger_step += 1
+            return
+        self.local_trigger_step = 1
+        self.staleness_samples = len(st.inflight) + len(self.queue)
+
+    def check_invariants(self, st: SimState) -> None:
+        assert len(self.queue) <= self.max_queue_size, (
+            f"Queue size {len(self.queue)} exceeds max {self.max_queue_size}."
+        )

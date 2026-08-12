@@ -1,0 +1,5 @@
+name: lognormal
+n: 200
+seed: 42
+mu: 4.0
+sigma: 1.0

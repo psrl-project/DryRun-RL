@@ -1,0 +1,5 @@
+name: uniform
+n: 200
+seed: 42
+lo: 50
+hi: 200

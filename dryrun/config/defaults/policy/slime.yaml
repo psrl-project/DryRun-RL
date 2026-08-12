@@ -1,0 +1,3 @@
+name: slime
+update_weights_interval: 1
+over_sampling_ratio: 1.0
