@@ -5,8 +5,8 @@ from __future__ import annotations
 from collections import deque
 from dataclasses import dataclass, field
 
+from ..component.rollout.engine import Request
 from .base import CompleteAction, SimState, StalenessPolicy
-from ..core.types import Request
 
 
 @dataclass
@@ -28,8 +28,8 @@ class RollPolicy(StalenessPolicy):
 
     name = "roll"
 
-    def __init__(self, max_concurrent: int | None = None):
-        self.max_concurrent = max_concurrent
+    def __init__(self, max_inflight: int | None = None):
+        self.max_inflight = max_inflight
         self.budget = 0
         self.running_prompts = 0
         self.completed_prompts = 0
@@ -53,8 +53,8 @@ class RollPolicy(StalenessPolicy):
             self._configure(st)
         self._ensure_group(st.version)
         room = self.budget - (self.running_prompts + self.completed_prompts)
-        if self.max_concurrent is not None:
-            room = min(room, self.max_concurrent - len(st.inflight))
+        if self.max_inflight is not None:
+            room = min(room, self.max_inflight - len(st.inflight))
         return max(0, room)
 
     def on_admit(self, req: Request, st: SimState) -> None:
@@ -71,12 +71,15 @@ class RollPolicy(StalenessPolicy):
         self.completed_prompts += 1
         return CompleteAction.KEEP
 
-    def select_batch(self, st: SimState) -> list[Request] | None:
+    def _eligible_steps(self, st: SimState) -> list[int]:
         min_step = st.version - st.max_staleness
         steps = [s for s in sorted(self.groups) if min_step <= s < st.version]
         if st.version in self.groups:
             steps.append(st.version)
+        return steps
 
+    def peek_batch(self, st: SimState) -> list[Request] | None:
+        steps = self._eligible_steps(st)
         available = sum(len(self.groups[s].finished) for s in steps)
         if available < st.batch_size:
             return None
@@ -84,11 +87,27 @@ class RollPolicy(StalenessPolicy):
         collected: list[Request] = []
         for step in steps:
             group = self.groups[step]
-            while group.finished and len(collected) < st.batch_size:
-                collected.append(group.finished.popleft())
+            needed = st.batch_size - len(collected)
+            collected.extend(list(group.finished)[:needed])
             if len(collected) >= st.batch_size:
                 break
         return collected[:st.batch_size]
+
+    def take_batch(self, st: SimState) -> list[Request] | None:
+        batch = self.peek_batch(st)
+        if batch is None:
+            return None
+
+        remaining = len(batch)
+        for step in self._eligible_steps(st):
+            group = self.groups[step]
+            take = min(remaining, len(group.finished))
+            for _ in range(take):
+                group.finished.popleft()
+            remaining -= take
+            if remaining == 0:
+                break
+        return batch
 
     def on_version_advance(self, version: int, st: SimState) -> None:
         self.budget += st.batch_size

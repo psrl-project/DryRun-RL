@@ -1,2 +1,5 @@
+# Training cost model name.
 name: fixed
+
+# Wall-clock time of one training step, in seconds.
 train_time: 1.0

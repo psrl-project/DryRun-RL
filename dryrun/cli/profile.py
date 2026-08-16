@@ -6,7 +6,6 @@ import argparse
 import logging
 import sys
 
-
 dryrun_logger = logging.getLogger("dryrun")
 
 

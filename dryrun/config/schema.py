@@ -34,7 +34,7 @@ class PolicyConfig:
     name: str = "psrl"
     proactive_filter: bool = False
     proactive_threshold: int = 0
-    max_concurrent: int | None = None
+    max_inflight: int | None = None
     update_weights_interval: int = 1
     over_sampling_ratio: float = 1.0
     staleness_threshold: float = 0.1
@@ -91,6 +91,40 @@ class RecomputeCostConfig:
 
 
 @dataclass
+class JobConfig:
+    """Basic job settings for one simulation run."""
+
+    n_versions: int = 20
+    batch_size: int = 8
+    max_staleness: int = 2
+    prompt_len: int = 512
+
+
+@dataclass
+class AdmissionControlConfig:
+    """Gates applied when a request is offered to an instance."""
+
+    reject_if_kv_full: bool = True
+    reject_if_waiting: bool = False
+    reject_if_running_full: bool = False
+
+
+@dataclass
+class RolloutConfig:
+    """Rollout engine knobs."""
+
+    n_instances: int = 1
+    partial_rollout: bool = True
+    token_budget: int = 8192
+    kv_blocks: int = 100_000
+    block_size: int = 16
+    max_concurrency: int | None = None
+    admission_control: AdmissionControlConfig = field(default_factory=AdmissionControlConfig)
+    livelock_rounds: int = 50
+    max_engine_iters: int = 10_000
+
+
+@dataclass
 class SimulateConfig:
     """Top-level simulation configuration."""
 
@@ -100,16 +134,6 @@ class SimulateConfig:
     train_cost: TrainCostConfig = field(default_factory=TrainCostConfig)
     sync_cost: SyncCostConfig = field(default_factory=SyncCostConfig)
     recompute_cost: RecomputeCostConfig = field(default_factory=RecomputeCostConfig)
-
-    batch_size: int = 8
-    max_staleness: int = 2
-    n_versions: int = 20
-    partial_rollout: bool = True
-    token_budget: int = 8192
-    kv_blocks: int = 100_000
-    block_size: int = 16
-    n_instances: int = 1
-    prompt_len: int = 512
-    livelock_rounds: int = 50
-    max_engine_iters: int = 10_000
+    job: JobConfig = field(default_factory=JobConfig)
+    rollout: RolloutConfig = field(default_factory=RolloutConfig)
     output_dir: str = "outputs"

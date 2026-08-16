@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections import deque
 
-from ..core.types import Request
+from ..component.rollout.engine import Request
 
 
 class CompletionBuffer:

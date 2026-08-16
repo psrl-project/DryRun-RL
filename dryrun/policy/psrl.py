@@ -14,8 +14,8 @@ from __future__ import annotations
 
 import sys
 
+from ..component.rollout.engine import Request
 from .base import CompleteAction, SimState, StalenessPolicy
-from ..core.types import Request
 
 _PSRL_ROOT = "/apdcephfs_zwfy10_303541817/share_303541817/lhy/psrl"
 
@@ -55,8 +55,8 @@ class PSRLPolicy(StalenessPolicy):
       filling from the end backwards (`get_last_non_reserved`).
     - Occupy (on_complete): greedy re-placement in the earliest buffer, with
       cross-buffer reserved-entry movement to avoid spurious STUCK states.
-    - Consume (select_batch): waits for the current-version buffer to be READY,
-      then deletes it and returns the batch.
+    - Consume (peek_batch/take_batch): waits for the current-version buffer to
+      be READY, then deletes it only when the batch is formally taken.
     """
 
     name = "psrl"
@@ -126,7 +126,7 @@ class PSRLPolicy(StalenessPolicy):
             return CompleteAction.DROP
         return CompleteAction.KEEP
 
-    def select_batch(self, st: SimState) -> list[Request] | None:
+    def peek_batch(self, st: SimState) -> list[Request] | None:
         assert self._inventory is not None
         bid = st.version
         if bid not in self._inventory.buffers:
@@ -135,10 +135,6 @@ class PSRLPolicy(StalenessPolicy):
         status = self._inventory.get_buffer_status(bid)
 
         if status in (BufferStatus.READY, BufferStatus.READY_WITH_CAPACITY):
-            if self.stuck_since is not None:
-                self.stuck_time += st.now - self.stuck_since
-                self.stuck_since = None
-
             buffer = self._inventory.buffers[bid]
             ready_n = buffer.ready_num_entries
             prompt_ids = [
@@ -151,15 +147,31 @@ class PSRLPolicy(StalenessPolicy):
             if len(chosen) < st.batch_size:
                 return None
 
-            self._inventory.delete_buffer(bid)
             return chosen[:st.batch_size]
 
+        return None
+
+    def take_batch(self, st: SimState) -> list[Request] | None:
+        chosen = self.peek_batch(st)
+        if chosen is None:
+            return None
+        if self.stuck_since is not None:
+            self.stuck_time += st.now - self.stuck_since
+            self.stuck_since = None
+        assert self._inventory is not None
+        self._inventory.delete_buffer(st.version)
+        return chosen
+
+    def on_batch_unavailable(self, st: SimState) -> None:
+        assert self._inventory is not None
+        bid = st.version
+        if bid not in self._inventory.buffers:
+            return
+        status = self._inventory.get_buffer_status(bid)
         if status == BufferStatus.STUCK:
             if self.stuck_since is None:
                 self.stuck_since = st.now
             self._maybe_proactive_filter(bid, st)
-
-        return None
 
     def on_version_advance(self, version: int, st: SimState) -> None:
         assert self._inventory is not None

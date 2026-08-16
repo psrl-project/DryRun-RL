@@ -9,25 +9,20 @@ from pathlib import Path
 import hydra
 from omegaconf import DictConfig
 
+from ..component.recompute.cost import AnalyticalRecomputeCost, FixedRecomputeCost, RecomputeCostModel
+from ..component.sync.cost import BandwidthSyncCost, FixedSyncCost, SyncCostModel
+from ..component.training.cost import AnalyticalTrainCost, FixedTrainCost, TrainCostModel
 from ..config import register_configs
 from ..cost.analytical import UnifiedRoofline
-from ..cost.base import CostModel, RecomputeCostModel, SyncCostModel, TrainCostModel
+from ..cost.base import CostModel
 from ..cost.empirical import DistServe, PSRLFitted
-from ..cost.train_cost import (
-    AnalyticalRecomputeCost,
-    AnalyticalTrainCost,
-    BandwidthSyncCost,
-    FixedRecomputeCost,
-    FixedSyncCost,
-    FixedTrainCost,
-)
 from ..policy.areal import ArealPolicy
 from ..policy.base import StalenessPolicy
 from ..policy.psrl import PSRLPolicy
 from ..policy.roll import RollPolicy
 from ..policy.slime import SlimePolicy
 from ..policy.verl import VerlPolicy
-from ..sim import SimConfig, Simulator
+from ..simulator import SimConfig, Simulator
 from ..viz.plots import SimPlotter
 from ..workload.distributions import bimodal, lognormal, powerlaw, uniform
 
@@ -75,23 +70,21 @@ def build_policy(cfg: DictConfig, max_staleness: int) -> StalenessPolicy:
             proactive_threshold=cfg.get("proactive_threshold", 0),
         )
     if name == "areal":
-        mc = cfg.get("max_concurrent", None)
-        return ArealPolicy(max_concurrent=mc)
+        return ArealPolicy(max_inflight=cfg.get("max_inflight", None))
     if name == "roll":
-        mc = cfg.get("max_concurrent", None)
-        return RollPolicy(max_concurrent=mc)
+        return RollPolicy(max_inflight=cfg.get("max_inflight", None))
     if name == "slime":
         return SlimePolicy(
             update_weights_interval=cfg.get("update_weights_interval", 1),
             over_sampling_ratio=cfg.get("over_sampling_ratio", 1.0),
-            max_concurrent=cfg.get("max_concurrent", None),
+            max_inflight=cfg.get("max_inflight", None),
         )
     if name == "verl":
         return VerlPolicy(
             staleness_threshold=cfg.get("staleness_threshold", 0.1),
             trigger_parameter_sync_step=cfg.get("trigger_parameter_sync_step", 4),
             require_batches=cfg.get("require_batches", 1),
-            max_concurrent=cfg.get("max_concurrent", None),
+            max_inflight=cfg.get("max_inflight", None),
         )
     raise ValueError(f"Unknown policy: {name!r}.")
 
@@ -161,25 +154,32 @@ def build_recompute_cost(cfg: DictConfig) -> RecomputeCostModel:
 
 def run_simulate(cfg: DictConfig) -> None:
     """Run a simulation from a resolved Hydra config."""
+    job = cfg.job
+    rollout = cfg.rollout
+    admit = rollout.admission_control
     sim_cfg = SimConfig(
-        batch_size=cfg.batch_size,
-        max_staleness=cfg.max_staleness,
-        n_versions=cfg.n_versions,
+        batch_size=job.batch_size,
+        max_staleness=job.max_staleness,
+        n_versions=job.n_versions,
         train_time=cfg.train_cost.get("train_time", 1.0),
         sync_time=cfg.sync_cost.get("sync_time", 0.0),
         recompute_time=0.0,
-        partial_rollout=cfg.partial_rollout,
-        token_budget=cfg.token_budget,
-        kv_blocks=cfg.kv_blocks,
-        block_size=cfg.block_size,
-        n_instances=cfg.n_instances,
-        prompt_len=cfg.prompt_len,
-        livelock_rounds=cfg.get("livelock_rounds", 50),
-        max_engine_iters=cfg.get("max_engine_iters", 10_000),
+        partial_rollout=rollout.partial_rollout,
+        token_budget=rollout.token_budget,
+        kv_blocks=rollout.kv_blocks,
+        block_size=rollout.block_size,
+        max_concurrency=rollout.get("max_concurrency", None),
+        reject_if_kv_full=admit.get("reject_if_kv_full", True),
+        reject_if_waiting=admit.get("reject_if_waiting", False),
+        reject_if_running_full=admit.get("reject_if_running_full", False),
+        n_instances=rollout.n_instances,
+        prompt_len=job.prompt_len,
+        livelock_rounds=rollout.get("livelock_rounds", 50),
+        max_engine_iters=rollout.get("max_engine_iters", 10_000),
     )
 
     cost_model = build_cost_model(cfg.cost_model)
-    policy = build_policy(cfg.policy, cfg.max_staleness)
+    policy = build_policy(cfg.policy, job.max_staleness)
     lengths = build_workload(cfg.workload)
     train_cost = build_train_cost(cfg.train_cost)
     sync_cost = build_sync_cost(cfg.sync_cost)

@@ -1,5 +1,14 @@
+# Output-length distribution name.
 name: uniform
+
+# Number of request lengths to sample.
 n: 200
+
+# RNG seed.
 seed: 42
+
+# Inclusive lower bound of generated tokens.
 lo: 50
+
+# Inclusive upper bound of generated tokens.
 hi: 200

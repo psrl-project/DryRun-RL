@@ -6,42 +6,16 @@ accounting, and preemption.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-
-from ..core.types import ReqStatus, Request
-from ..cost.base import CostModel
-from . import segment as seg
+from ....cost.base import CostModel
+from . import advance
+from .event import EngineEvent, EventKind
+from .request import ReqStatus, Request
+from .snapshot import InstanceSnapshot
+from .state import InstanceLoad, StepStat
 
 
 def blocks_for(n_tokens: int, block_size: int) -> int:
     return (n_tokens + block_size - 1) // block_size
-
-
-@dataclass
-class StepStat:
-    """Aggregated engine steps."""
-
-    n_tokens: int
-    n_decode: int
-    n_prefill: int
-    saturated: bool
-    steps: int = 1
-    saturated_steps: int = 0
-
-    def __post_init__(self) -> None:
-        if self.saturated and self.saturated_steps == 0:
-            self.saturated_steps = self.steps
-
-
-@dataclass
-class InstanceLoad:
-    """Snapshot of instance load for routing decisions."""
-
-    instance_id: int
-    n_waiting: int
-    n_running: int
-    kv_utilization: float
-    total_ctx: int
 
 
 class NativeInstance:
@@ -54,16 +28,24 @@ class NativeInstance:
         kv_blocks: int,
         block_size: int = 16,
         max_running: int | None = None,
+        max_concurrency: int | None = None,
         chunk_cap: int | None = None,
         instance_id: int = 0,
+        reject_if_kv_full: bool = True,
+        reject_if_waiting: bool = False,
+        reject_if_running_full: bool = False,
     ):
         self.cost = cost
         self.M = token_budget
         self.kv_blocks = kv_blocks
         self.block_size = block_size
         self.max_running = max_running
+        self.max_concurrency = max_concurrency
         self.chunk_cap = chunk_cap
         self.instance_id = instance_id
+        self.reject_if_kv_full = reject_if_kv_full
+        self.reject_if_waiting = reject_if_waiting
+        self.reject_if_running_full = reject_if_running_full
 
         self.t_local: float = 0.0
         self.waiting: list[Request] = []
@@ -71,6 +53,7 @@ class NativeInstance:
         self.step_stats: list[StepStat] = []
         self.n_preemptions: int = 0
         self.completed: list[Request] = []
+        self._snapshot: InstanceSnapshot | None = None
 
     @property
     def n_active(self) -> int:
@@ -91,26 +74,71 @@ class NativeInstance:
     def free_blocks(self) -> int:
         return self.kv_blocks - self.blocks_used()
 
+    def _save_snapshot(self) -> None:
+        """Save current state as the undo point for the next event."""
+        self._snapshot = InstanceSnapshot.capture(self)
+
+    def undo_last_event(self) -> None:
+        """Restore state from the last saved snapshot, reversing the last event."""
+        assert self._snapshot is not None, "No snapshot to undo."
+        self._snapshot.restore(self)
+        self._snapshot = None
+
     def add_request(self, req: Request, t: float) -> bool:
-        if self.max_running is not None and self.n_active >= self.max_running:
-            return False
+        """
+        Try to admit `req` onto this instance.
+
+        Returns False when the instance is temporarily unable to take more work
+        (concurrency / waiting / reserved-KV gates). Raises if the request can
+        never fit in this instance's KV cache, even when empty.
+        """
         need = blocks_for(req.prompt_len + req.target_len, self.block_size)
         if need > self.kv_blocks:
+            raise ValueError(
+                f"Request {req.rid} needs {need} KV blocks "
+                f"(prompt_len={req.prompt_len}, target_len={req.target_len}, "
+                f"block_size={self.block_size}) but instance {self.instance_id} "
+                f"only has {self.kv_blocks} blocks. So it can never be admitted."
+            )
+        if self.max_running is not None and self.n_active >= self.max_running:
             return False
-        committed = sum(
-            blocks_for(r.prompt_len + r.target_len, self.block_size)
-            for r in self.waiting + self.running
-        )
-        if committed + need > self.kv_blocks:
+        if self.reject_if_waiting and self.waiting:
             return False
+        if self.reject_if_running_full and not self._can_schedule_new():
+            return False
+        if self.reject_if_kv_full:
+            committed = sum(
+                blocks_for(r.prompt_len + r.target_len, self.block_size)
+                for r in self.waiting + self.running
+            )
+            if committed + need > self.kv_blocks:
+                return False
         req.status = ReqStatus.WAITING
         req.dispatch_time = t
         req.instance_id = self.instance_id
         self.waiting.append(req)
         return True
 
+    def _n_in_batch(self) -> int:
+        """vLLM running-queue size: decoding plus already-started prefills."""
+        return len(self.running) + sum(1 for r in self.waiting if r.prefilled > 0)
+
+    def _can_run_more(self) -> bool:
+        return self.max_concurrency is None or len(self.running) < self.max_concurrency
+
+    def _can_schedule_new(self) -> bool:
+        """Whether a not-yet-started waiting request can join the batch.
+
+        Mirrors vLLM `max_num_seqs`: waiting is only pulled into the running
+        queue while `len(running) < max_num_seqs`. Mid-prefill requests already
+        occupy a slot (`prefilled > 0`).
+        """
+        return self.max_concurrency is None or self._n_in_batch() < self.max_concurrency
+
     def _promote_ready(self) -> None:
         for req in list(self.waiting):
+            if not self._can_run_more():
+                break
             if req.prompt_len + req.generated - req.prefilled <= 0:
                 self.waiting.remove(req)
                 req.status = ReqStatus.RUNNING
@@ -123,12 +151,18 @@ class NativeInstance:
         budget = self.M - n_decode
         t2 = 0
         prefill_tokens = 0
+        n_prefill_reqs = 0
         finished_prefill: list[Request] = []
+        n_in_batch = self._n_in_batch()
 
         free = self.free_blocks()
         for req in sorted(self.waiting, key=lambda r: (r.dispatch_time, r.rid)):
             if budget <= 0:
                 break
+            if req.prefilled == 0:
+                if self.max_concurrency is not None and n_in_batch >= self.max_concurrency:
+                    break
+                n_in_batch += 1
             need = req.prompt_len + req.generated - req.prefilled
             if need <= 0:
                 finished_prefill.append(req)
@@ -143,6 +177,7 @@ class NativeInstance:
             free -= blocks_for(req.prefilled + chunk, self.block_size) - have
             req.prefilled += chunk
             prefill_tokens += chunk
+            n_prefill_reqs += 1
             t2 += chunk * chunk
             budget -= chunk
             if req.prefilled >= req.prompt_len + req.generated:
@@ -150,13 +185,15 @@ class NativeInstance:
 
         ctxsum = sum(r.ctx for r in self.running)
         n_tokens = n_decode + prefill_tokens
-        dt = self.cost.step_time(n_tokens, t2, ctxsum, n_d + len(self.waiting))
+        n_reqs = n_d + n_prefill_reqs
+        dt = self.cost.step_time(n_tokens, t2, ctxsum, n_reqs)
+        assert dt > 0, f"Cost model returned non-positive step time: {dt!r}."
         self.step_stats.append(
             StepStat(
                 n_tokens,
                 n_decode,
                 prefill_tokens,
-                self.cost.saturated(n_tokens, t2, ctxsum, n_d + len(self.waiting)),
+                self.cost.saturated(n_tokens, t2, ctxsum, n_reqs),
                 steps=1,
             )
         )
@@ -173,6 +210,8 @@ class NativeInstance:
         newly_done = [r for r in stepped if r.remaining <= 0]
 
         for req in finished_prefill:
+            if not self._can_run_more():
+                break
             self.waiting.remove(req)
             req.status = ReqStatus.RUNNING
             self.running.append(req)
@@ -205,6 +244,134 @@ class NativeInstance:
                 lo = mid + 1
         return lo
 
+    def _step_time_estimate(self) -> float:
+        """
+        Compute the step time for the next prefill iteration without mutating state.
+
+        Uses the same allocation logic as `_prefill_budget_step` but tracks
+        `prefilled` deltas locally so no request field is modified.
+        """
+        n_d = len(self.running)
+        n_decode = min(n_d, self.M)
+        budget = self.M - n_decode
+        t2 = 0
+        prefill_tokens = 0
+        free = self.free_blocks()
+        effective: dict[int, int] = {}  # id(req) -> effective prefilled
+        n_prefill_reqs = 0
+        n_in_batch = self._n_in_batch()
+
+        for req in sorted(self.waiting, key=lambda r: (r.dispatch_time, r.rid)):
+            if budget <= 0:
+                break
+            if req.prefilled == 0:
+                if self.max_concurrency is not None and n_in_batch >= self.max_concurrency:
+                    break
+                n_in_batch += 1
+            eff = effective.get(id(req), req.prefilled)
+            need = req.prompt_len + req.generated - eff
+            if need <= 0:
+                continue
+            chunk = min(need, budget)
+            if self.chunk_cap:
+                chunk = min(chunk, self.chunk_cap)
+            have = blocks_for(eff, self.block_size)
+            chunk = min(chunk, (have + max(0, free)) * self.block_size - eff)
+            if chunk <= 0:
+                break
+            free -= blocks_for(eff + chunk, self.block_size) - have
+            effective[id(req)] = eff + chunk
+            prefill_tokens += chunk
+            n_prefill_reqs += 1
+            t2 += chunk * chunk
+            budget -= chunk
+
+        ctxsum = sum(r.ctx for r in self.running)
+        n_tokens = n_decode + prefill_tokens
+        return self.cost.step_time(n_tokens, t2, ctxsum, n_d + n_prefill_reqs)
+
+    def _prefill_one_event(self, version: int) -> EngineEvent:
+        """Execute one prefill step and return the resulting event."""
+        dt, newly = self._prefill_budget_step(version)
+        self.t_local += dt
+        if newly:
+            done = self._retire(newly)
+            return EngineEvent(
+                kind=EventKind.REQUEST_COMPLETE,
+                instance_id=self.instance_id,
+                t=self.t_local,
+                completed=done,
+            )
+        if self._deadlocked():
+            self._preempt_for_progress()
+            return EngineEvent(
+                kind=EventKind.DEADLOCK_PREEMPT,
+                instance_id=self.instance_id,
+                t=self.t_local,
+            )
+        return EngineEvent(
+            kind=EventKind.PREFILL_STEP,
+            instance_id=self.instance_id,
+            t=self.t_local,
+        )
+
+    def _decode_one_event(self, version: int) -> EngineEvent:
+        """Advance one full decode segment (until completion or KV exhaustion) and return the event."""
+        F, alpha, beta = self._decode_coeffs()
+        k_done, _ = advance.next_completion([r.remaining for r in self.running])
+        k_kv = self._kv_exhaustion_steps()
+        k = k_done if k_kv is None else min(k_done, k_kv)
+
+        if k > 0:
+            n_d = len(self.running)
+            for r in self.running:
+                r.add_tokens(version, k)
+                r.prefilled += k
+            self.t_local += advance.elapsed(F, alpha, beta, k)
+            k0 = advance.crossing_step(F, alpha, beta, k_cap=k)
+            self.step_stats.append(
+                StepStat(
+                    n_tokens=n_d * k,
+                    n_decode=n_d * k,
+                    n_prefill=0,
+                    saturated=k > k0,
+                    steps=k,
+                    saturated_steps=k - k0,
+                )
+            )
+
+        if self.blocks_used() > self.kv_blocks or (k_kv is not None and k >= k_kv):
+            self._preempt_one()
+            return EngineEvent(
+                kind=EventKind.KV_PREEMPT,
+                instance_id=self.instance_id,
+                t=self.t_local,
+            )
+
+        newly = [r for r in self.running if r.remaining <= 0]
+        done = self._retire(newly)
+        return EngineEvent(
+            kind=EventKind.REQUEST_COMPLETE,
+            instance_id=self.instance_id,
+            t=self.t_local,
+            completed=done,
+        )
+
+    def advance_one_event(self, version: int) -> EngineEvent | None:
+        """
+        Advance this instance to its next discrete event.
+
+        Saves a snapshot for undo before mutating state. Returns the event, or
+        None if the instance is idle (no waiting or running requests).
+        """
+        self._promote_ready()
+        if not self.running and not self.waiting:
+            return None
+        self._save_snapshot()
+        if self.waiting:
+            return self._prefill_one_event(version)
+        return self._decode_one_event(version)
+
     def run_until(self, t_limit: float, version: int) -> list[Request]:
         done = []
         while self.t_local < t_limit:
@@ -233,13 +400,11 @@ class NativeInstance:
                 if steps >= max_steps:
                     return done, False
                 steps += 1
-                dt, newly = self._prefill_budget_step(version)
-                if self.t_local + dt > t_limit and not newly:
+                dt = self._step_time_estimate()
+                if self.t_local + dt > t_limit:
                     self.t_local = t_limit
                     return done, True
-                if dt <= 0:
-                    self.t_local = t_limit
-                    return done, True
+                _, newly = self._prefill_budget_step(version)
                 self.t_local += dt
                 done.extend(self._retire(newly))
                 if newly:
@@ -255,11 +420,11 @@ class NativeInstance:
                 return done, True
 
             F, alpha, beta = self._decode_coeffs()
-            k_done, _ = seg.next_completion([r.remaining for r in self.running])
+            k_done, _ = advance.next_completion([r.remaining for r in self.running])
             k_kv = self._kv_exhaustion_steps()
             k_int = k_done if k_kv is None else min(k_done, k_kv)
             budget = t_limit - self.t_local
-            k_budget = seg.steps_within(F, alpha, beta, budget)
+            k_budget = advance.steps_within(F, alpha, beta, budget)
 
             k = min(k_int, k_budget)
             if k > 0:
@@ -267,8 +432,8 @@ class NativeInstance:
                 for r in self.running:
                     r.add_tokens(version, k)
                     r.prefilled += k
-                self.t_local += seg.elapsed(F, alpha, beta, k)
-                k0 = seg.crossing_step(F, alpha, beta, k_cap=k)
+                self.t_local += advance.elapsed(F, alpha, beta, k)
+                k0 = advance.crossing_step(F, alpha, beta, k_cap=k)
                 self.step_stats.append(
                     StepStat(
                         n_tokens=n_d * k,

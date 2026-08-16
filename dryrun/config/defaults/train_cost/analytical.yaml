@@ -1,5 +1,14 @@
+# Training cost model name.
 name: analytical
+
+# Number of model parameters (used to estimate FLOPs and bytes).
 model_params: 8000000000
+
+# Peak compute of the training device, in FLOP/s.
 peak_flops: 312.0e12
+
+# Peak memory bandwidth of the training device, in bytes/s.
 memory_bandwidth: 2.0e12
+
+# Multiplier for framework / communication overhead.
 overhead_factor: 1.1

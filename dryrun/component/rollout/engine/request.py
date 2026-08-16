@@ -1,4 +1,11 @@
-"""Core data types for the DryRun-RL simulator."""
+"""The request data model shared across the simulator.
+
+A `Request` is the unit of work every component handles: the workload generator
+creates it, the router places it, `NativeInstance` generates its tokens, the
+staleness policy decides when it is consumed, and the trainer batches it. Its
+`Segment` list records which weight version produced each stretch of tokens,
+which is what the staleness metrics are computed from.
+"""
 
 from __future__ import annotations
 

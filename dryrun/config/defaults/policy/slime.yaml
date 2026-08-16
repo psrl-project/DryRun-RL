@@ -1,3 +1,8 @@
+# Staleness policy name.
 name: slime
+
+# Push new weights every N training steps (loop barrier interval).
 update_weights_interval: 1
+
+# Admit this many times batch_size before waiting to collect a full batch.
 over_sampling_ratio: 1.0

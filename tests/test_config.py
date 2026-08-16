@@ -5,25 +5,27 @@ from __future__ import annotations
 import pytest
 from omegaconf import OmegaConf
 
+from dryrun.cli.main import (
+    build_cost_model,
+    build_policy,
+    build_recompute_cost,
+    build_sync_cost,
+    build_train_cost,
+    build_workload,
+)
+from dryrun.component.recompute.cost import FixedRecomputeCost
+from dryrun.component.sync.cost import FixedSyncCost
+from dryrun.component.training.cost import AnalyticalTrainCost, FixedTrainCost
 from dryrun.config.schema import (
     CostModelConfig,
     PolicyConfig,
     SimulateConfig,
     WorkloadConfig,
 )
-from dryrun.cli.main import (
-    build_cost_model,
-    build_policy,
-    build_workload,
-    build_train_cost,
-    build_sync_cost,
-    build_recompute_cost,
-)
 from dryrun.cost.analytical import UnifiedRoofline
 from dryrun.cost.empirical import DistServe
-from dryrun.cost.train_cost import AnalyticalTrainCost, FixedTrainCost, FixedSyncCost, FixedRecomputeCost
-from dryrun.policy.psrl import PSRLPolicy
 from dryrun.policy.areal import ArealPolicy
+from dryrun.policy.psrl import PSRLPolicy
 from dryrun.policy.roll import RollPolicy
 from dryrun.policy.slime import SlimePolicy
 from dryrun.policy.verl import VerlPolicy
@@ -34,11 +36,15 @@ class TestStructuredConfigs:
 
     def test_simulate_defaults(self):
         cfg = SimulateConfig()
-        assert cfg.batch_size == 8
-        assert cfg.max_staleness == 2
-        assert cfg.n_versions == 20
-        assert cfg.n_instances == 1
-        assert cfg.partial_rollout is True
+        assert cfg.job.batch_size == 8
+        assert cfg.job.max_staleness == 2
+        assert cfg.job.n_versions == 20
+        assert cfg.job.prompt_len == 512
+        assert cfg.rollout.n_instances == 1
+        assert cfg.rollout.partial_rollout is True
+        assert cfg.rollout.admission_control.reject_if_kv_full is True
+        assert cfg.rollout.admission_control.reject_if_waiting is False
+        assert cfg.rollout.admission_control.reject_if_running_full is False
         assert cfg.cost_model.name == "roofline"
         assert cfg.policy.name == "psrl"
         assert cfg.workload.name == "uniform"
@@ -144,14 +150,14 @@ class TestOmegaConfIntegration:
 
     def test_from_dataclass(self):
         cfg = OmegaConf.structured(SimulateConfig())
-        assert cfg.batch_size == 8
+        assert cfg.job.batch_size == 8
         assert cfg.cost_model.name == "roofline"
         assert cfg.policy.name == "psrl"
 
     def test_override(self):
         cfg = OmegaConf.structured(SimulateConfig())
-        cfg = OmegaConf.merge(cfg, {"batch_size": 16, "policy": {"name": "areal"}})
-        assert cfg.batch_size == 16
+        cfg = OmegaConf.merge(cfg, {"job": {"batch_size": 16}, "policy": {"name": "areal"}})
+        assert cfg.job.batch_size == 16
         assert cfg.policy.name == "areal"
 
     def test_yaml_roundtrip(self, tmp_path):
@@ -159,5 +165,5 @@ class TestOmegaConfIntegration:
         yaml_path = tmp_path / "test.yaml"
         OmegaConf.save(cfg, yaml_path)
         loaded = OmegaConf.load(yaml_path)
-        assert loaded.batch_size == cfg.batch_size
+        assert loaded.job.batch_size == cfg.job.batch_size
         assert loaded.cost_model.name == cfg.cost_model.name

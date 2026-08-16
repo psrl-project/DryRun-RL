@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
+from ..component.rollout.engine import Request
 from .base import CompleteAction, SimState, StalenessPolicy
-from ..core.types import Request
 
 
 class SlimePolicy(StalenessPolicy):
@@ -22,14 +22,14 @@ class SlimePolicy(StalenessPolicy):
         update_weights_interval: int = 1,
         over_sampling_ratio: float = 1.0,
         partial_rollout: bool = False,
-        max_concurrent: int | None = None,
+        max_inflight: int | None = None,
     ):
         assert update_weights_interval >= 1, "update_weights_interval must be >= 1."
         assert over_sampling_ratio >= 1.0, "over_sampling_ratio must be >= 1.0."
         self.interval = update_weights_interval
         self.over_sampling_ratio = over_sampling_ratio
         self.partial_rollout = partial_rollout
-        self.max_concurrent = max_concurrent
+        self.max_inflight = max_inflight
 
         self.remaining = 0
         self._engine_v = 0
@@ -42,8 +42,8 @@ class SlimePolicy(StalenessPolicy):
         if self.remaining >= st.batch_size:
             return 0
         room = max(1, int(round(self.over_sampling_ratio * st.batch_size)))
-        if self.max_concurrent is not None:
-            room = min(room, self.max_concurrent - len(st.inflight))
+        if self.max_inflight is not None:
+            room = min(room, self.max_inflight - len(st.inflight))
         return max(0, room)
 
     def on_admit(self, req: Request, st: SimState) -> None:
@@ -54,17 +54,24 @@ class SlimePolicy(StalenessPolicy):
             return CompleteAction.KEEP
         return CompleteAction.DROP
 
-    def select_batch(self, st: SimState) -> list[Request] | None:
+    def peek_batch(self, st: SimState) -> list[Request] | None:
         if len(st.ready) < st.batch_size:
-            if st.inflight and self.stall_since is None:
-                self.stall_since = st.now
+            return None
+        return list(st.ready[:st.batch_size])
+
+    def take_batch(self, st: SimState) -> list[Request] | None:
+        chosen = self.peek_batch(st)
+        if chosen is None:
             return None
         if self.stall_since is not None:
             self.stall_time += st.now - self.stall_since
             self.stall_since = None
-        chosen = list(st.ready[:st.batch_size])
         self.remaining = 0
         return chosen
+
+    def on_batch_unavailable(self, st: SimState) -> None:
+        if st.inflight and self.stall_since is None:
+            self.stall_since = st.now
 
     def engine_version_after_train(self, st: SimState) -> int:
         if self._armed_push is not None:

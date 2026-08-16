@@ -1,6 +1,17 @@
+# Output-length distribution name.
 name: bimodal
+
+# Number of request lengths to sample.
 n: 200
+
+# RNG seed.
 seed: 42
+
+# Generated length of the short mode.
 short_len: 50
+
+# Generated length of the long mode.
 long_len: 500
+
+# Fraction of requests drawn from the long mode.
 long_frac: 0.25

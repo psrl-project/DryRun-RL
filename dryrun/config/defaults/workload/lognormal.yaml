@@ -1,5 +1,14 @@
+# Output-length distribution name.
 name: lognormal
+
+# Number of request lengths to sample.
 n: 200
+
+# RNG seed.
 seed: 42
+
+# Mean of the underlying normal (log-space).
 mu: 4.0
+
+# Stddev of the underlying normal (log-space).
 sigma: 1.0

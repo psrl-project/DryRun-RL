@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from collections import deque
 
+from ..component.rollout.engine import Request
 from .base import CompleteAction, SimState, StalenessPolicy
-from ..core.types import Request
 
 
 class VerlPolicy(StalenessPolicy):
@@ -24,12 +24,12 @@ class VerlPolicy(StalenessPolicy):
         staleness_threshold: float = 0.1,
         trigger_parameter_sync_step: int = 4,
         require_batches: int = 1,
-        max_concurrent: int | None = None,
+        max_inflight: int | None = None,
     ):
         self.threshold = staleness_threshold
         self.sync_step = trigger_parameter_sync_step
         self.require_batches = require_batches
-        self.max_concurrent = max_concurrent
+        self.max_inflight = max_inflight
 
         self.staleness_samples = 0
         self.local_trigger_step = 1
@@ -54,8 +54,8 @@ class VerlPolicy(StalenessPolicy):
         if self.staleness_samples >= self.max_required:
             return 0
         room = self.max_required - self.staleness_samples
-        if self.max_concurrent is not None:
-            room = min(room, self.max_concurrent - len(st.inflight))
+        if self.max_inflight is not None:
+            room = min(room, self.max_inflight - len(st.inflight))
         return max(0, room)
 
     def on_admit(self, req: Request, st: SimState) -> None:
@@ -70,10 +70,17 @@ class VerlPolicy(StalenessPolicy):
         self.queue.append(req)
         return CompleteAction.KEEP
 
-    def select_batch(self, st: SimState) -> list[Request] | None:
+    def peek_batch(self, st: SimState) -> list[Request] | None:
         required = st.batch_size * self.require_batches
         if len(self.queue) < required:
             return None
+        return list(self.queue)[:required]
+
+    def take_batch(self, st: SimState) -> list[Request] | None:
+        batch = self.peek_batch(st)
+        if batch is None:
+            return None
+        required = len(batch)
         return [self.queue.popleft() for _ in range(required)]
 
     def on_version_advance(self, version: int, st: SimState) -> None:

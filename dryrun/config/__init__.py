@@ -3,9 +3,12 @@
 from hydra.core.config_store import ConfigStore
 
 from .schema import (
+    AdmissionControlConfig,
     CostModelConfig,
+    JobConfig,
     PolicyConfig,
     RecomputeCostConfig,
+    RolloutConfig,
     SimulateConfig,
     SyncCostConfig,
     TrainCostConfig,

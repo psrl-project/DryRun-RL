@@ -6,7 +6,7 @@ from dryrun.policy.psrl import PSRLPolicy
 from dryrun.policy.roll import RollPolicy
 from dryrun.policy.slime import SlimePolicy
 from dryrun.policy.verl import VerlPolicy
-from dryrun.sim import SimConfig, Simulator
+from dryrun.simulator import SimConfig, Simulator
 from dryrun.workload.distributions import bimodal, uniform
 
 

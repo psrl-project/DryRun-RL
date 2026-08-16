@@ -1,3 +1,8 @@
+# Inference cost model name.
 name: psrl_fitted
+
+# Path to a fitted cost-model JSON produced by dryrun-profile fit.
 path: ""
+
+# Parallelism key inside that JSON, e.g. TP1_PP1.
 key: TP1_PP1

@@ -9,8 +9,8 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from dryrun.profiling.fit import fit_cost_model, save_fit_result
 from dryrun.cost.empirical import PSRLFitted
+from dryrun.profiling.fit import fit_cost_model, save_fit_result
 
 
 def _generate_synthetic_data(

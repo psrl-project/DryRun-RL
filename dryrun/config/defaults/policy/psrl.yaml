@@ -1,3 +1,8 @@
+# Staleness policy name.
 name: psrl
+
+# Drop leftover reserved buffer entries that are unlikely to be filled in time.
 proactive_filter: false
+
+# Apply proactive_filter only when this many or fewer reserved entries remain.
 proactive_threshold: 0

@@ -1,6 +1,10 @@
-"""Closed-form intra-segment advancement.
+"""Closed-form advancement of a decode segment.
 
-Within a pure-decode segment of n_d requests each gaining one token per step,
+A decode segment is a run of steps over a fixed batch, with no prefill mixed in
+and no request entering or leaving. It is unrelated to `Segment` in `request`,
+which tracks weight versions.
+
+Within a decode segment of n_d requests each gaining one token per step,
 the k-th step costs
 
     tau(k) = max(F, alpha + beta * k),   k = 0, 1, 2, ...

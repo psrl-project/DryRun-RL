@@ -56,6 +56,10 @@ class CostModel(ABC):
         """
         Predict latency of a single engine step.
 
+        Returns:
+            Strictly positive wall-clock latency. A non-positive value is a
+            cost-model bug, not an idle engine.
+
         Args:
             n_tokens: Total tokens processed in this step. For a pure decode
                 step with `n_d` requests this equals `n_d` (one new token
@@ -90,7 +94,7 @@ class CostModel(ABC):
         - beta: Marginal latency increase per step, equal to the attention
           cost of `n_d` additional context tokens.
 
-        The closed-form segment math (`engine/segment.py`) integrates this
+        The closed-form advance (`engine/advance.py`) integrates this
         piecewise-linear function analytically, avoiding per-token simulation.
 
         Args:
@@ -101,68 +105,3 @@ class CostModel(ABC):
     def saturated(self, n_tokens, t2, ctxsum, n_reqs) -> bool:
         """Whether the GPU is fully utilised (above the roofline knee)."""
         return False
-
-
-class TrainCostModel(ABC):
-    """
-    Training step latency model.
-
-    Predicts the wall-clock time for one gradient accumulation + update step.
-    The dominant cost is the forward + backward pass over the batch, which
-    scales linearly with `total_tokens` and inversely with data-parallel
-    degree.
-    """
-
-    @abstractmethod
-    def step_time(self, batch_size: int, total_tokens: int, dp_size: int) -> float:
-        """
-        Wall-clock time for one gradient step.
-
-        Args:
-            batch_size: Number of sequences in the training batch.
-            total_tokens: Total tokens across all sequences (sum of lengths).
-            dp_size: Data-parallel degree. Each DP rank processes
-                `total_tokens / dp_size` tokens.
-        """
-
-
-class SyncCostModel(ABC):
-    """
-    Weight synchronization latency model.
-
-    After a training step produces new weights, they must be distributed to
-    all rollout instances. The cost depends on model size, number of
-    instances, and available interconnect bandwidth.
-    """
-
-    @abstractmethod
-    def sync_time(self, model_size_bytes: int, n_instances: int, bandwidth_gbps: float) -> float:
-        """
-        Time to distribute updated weights to all rollout instances.
-
-        Args:
-            model_size_bytes: Size of the model parameters in bytes.
-            n_instances: Number of rollout instances to update.
-            bandwidth_gbps: Available network bandwidth in Gbps.
-        """
-
-
-class RecomputeCostModel(ABC):
-    """
-    Log-prob recomputation latency model.
-
-    Some RL algorithms (PPO, GRPO) require log-probabilities under the new
-    policy for the consumed batch. This is a forward pass on the training
-    side, cheaper than a full training step.
-    """
-
-    @abstractmethod
-    def recompute_time(self, batch_size: int, total_tokens: int, tp_size: int) -> float:
-        """
-        Wall-clock time for recomputing log-probs on a batch.
-
-        Args:
-            batch_size: Number of sequences.
-            total_tokens: Total tokens across all sequences.
-            tp_size: Tensor-parallel degree used for the recompute pass.
-        """

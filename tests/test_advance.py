@@ -1,8 +1,8 @@
-"""Test segment math: closed-form advancement must match brute-force."""
+"""Test closed-form advance: must match brute-force step summation."""
 
 from fractions import Fraction
 
-from dryrun.engine.segment import crossing_step, elapsed, next_completion, steps_within
+from dryrun.component.rollout.engine.advance import crossing_step, elapsed, next_completion, steps_within
 
 
 def test_elapsed_matches_brute_force():

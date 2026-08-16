@@ -9,18 +9,18 @@ Async disaggregate RL training simulator. Evaluates staleness control policies, 
 pip install -e .
 
 # Run a simulation with PSRL policy (Hydra CLI)
-dryrun policy=psrl n_versions=20 n_instances=4 batch_size=8
+dryrun policy=psrl job.n_versions=20 rollout.n_instances=4 job.batch_size=8
 
 # Run with bimodal workload
-dryrun policy=areal workload=bimodal n_versions=10
+dryrun policy=areal workload=bimodal job.n_versions=10
 
 # Compare all policies
 for p in psrl areal roll slime verl; do
-    dryrun policy=$p n_versions=10 output_dir=outputs/$p
+    dryrun policy=$p job.n_versions=10 output_dir=outputs/$p
 done
 
 # Hydra multirun sweep
-dryrun --multirun policy=psrl,areal,roll n_instances=1,2,4
+dryrun --multirun policy=psrl,areal,roll rollout.n_instances=1,2,4
 ```
 
 ## Simulation CLI (Hydra)
@@ -33,10 +33,10 @@ dryrun [key=value ...]
 #   cost_model=roofline|psrl_fitted      Inference cost model
 #   workload=uniform|bimodal|lognormal|powerlaw
 #   train_cost=fixed|analytical          Training cost model
-#   n_versions=20                        Training steps to simulate
-#   n_instances=1                        Number of rollout instances
-#   batch_size=8                         Training batch size
-#   max_staleness=2                      Maximum allowed staleness
+#   job.n_versions=20                   Training steps to simulate
+#   job.batch_size=8                    Training batch size
+#   job.max_staleness=2                 Maximum allowed staleness
+#   rollout.n_instances=1                Number of rollout instances
 #   output_dir=outputs                   Output directory for plots
 
 # Use a fitted cost model from profiling
@@ -135,17 +135,20 @@ The two-stage fitting separates attention (scales with KV cache size) from non-a
 
 ```
 dryrun/
-    core/           Event coordinator, types, component interface
-    engine/         Rollout instances, segment math
+    component/      One subpackage per RL loop stage
+        rollout/    Engine instances (request model, closed-form advance, KV) + router
+        training/   Gradient step cost models
+        sync/       Weight synchronization cost models
+        recompute/  Log-prob recomputation cost models
+    simulator/      Simulation driver (Simulator, SimConfig, SimResult)
     policy/         5 staleness policies (psrl, areal, roll, slime, verl)
-    cost/           Analytical + empirical cost models
+    cost/           Analytical + empirical inference cost models
     config/         Hydra structured configs + YAML defaults
     profiling/      vLLM/Megatron profiling + two-stage regression fitter
     workload/       Length distribution generators
     buffer/         Queue data structures
     viz/            Matplotlib offline plots
     cli/            Hydra simulation CLI + profiling CLI
-    sim.py          Simulation driver
 ```
 
 ## Running Tests
@@ -160,7 +163,7 @@ python -m pytest tests/ -v
 ```python
 from dryrun.cost.analytical import UnifiedRoofline
 from dryrun.policy.psrl import PSRLPolicy
-from dryrun.sim import SimConfig, Simulator
+from dryrun.simulator import SimConfig, Simulator
 from dryrun.workload.distributions import bimodal
 
 cost = UnifiedRoofline(F=0.005, W=0.001, G=0.0001, A_d=1e-7)

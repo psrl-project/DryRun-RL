@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from ..core.types import Request
+from ..component.rollout.engine import Request
 
 
 class WorkloadGenerator:

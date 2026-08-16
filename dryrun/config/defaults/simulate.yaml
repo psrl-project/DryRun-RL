@@ -5,23 +5,72 @@ defaults:
   - workload: uniform
   - train_cost: fixed
 
-batch_size: 8
-max_staleness: 2
-n_versions: 20
-partial_rollout: true
-token_budget: 8192
-kv_blocks: 100000
-block_size: 16
-n_instances: 1
-prompt_len: 512
-livelock_rounds: 50
-max_engine_iters: 10000
+# Basic settings of one simulation job.
+job:
+  # Number of training versions (steps) to simulate.
+  n_versions: 20
+
+  # Training batch size.
+  batch_size: 8
+
+  # Maximum allowed staleness of consumed training data.
+  max_staleness: 2
+
+  # Prompt length of each request, in tokens.
+  prompt_len: 512
+
+# Rollout engine settings.
+rollout:
+  # Number of rollout engine instances.
+  n_instances: 1
+
+  # Abort in-flight rollouts when a new weight version is published.
+  partial_rollout: true
+
+  # Per-step token budget of one instance (max tokens per engine step).
+  token_budget: 8192
+
+  # KV cache capacity in blocks.
+  kv_blocks: 100000
+
+  # Tokens per KV block.
+  block_size: 16
+
+  # Max sequences in the running batch (vLLM max_num_seqs). null = unlimited.
+  max_concurrency: null
+
+  # Admission gates applied when a request is offered to an instance.
+  admission_control:
+    # Reject new requests when reserved KV would exceed capacity.
+    reject_if_kv_full: true
+
+    # Reject new requests while any request is still waiting.
+    reject_if_waiting: false
+
+    # Reject new requests when the running batch is already at max_concurrency.
+    reject_if_running_full: false
+
+  # Idle rounds before the simulator declares livelock.
+  livelock_rounds: 50
+
+  # Safety cap on engine iterations per generate call.
+  max_engine_iters: 10000
+
+# Directory for plots and simulation outputs.
 output_dir: outputs
 
+# Weight-sync cost model.
 sync_cost:
+  # Cost model name: fixed or bandwidth.
   name: fixed
+
+  # Fixed weight-sync time in seconds (used when name=fixed).
   sync_time: 0.0
 
+# Partial-rollout recompute cost model.
 recompute_cost:
+  # Cost model name: fixed or analytical.
   name: fixed
+
+  # Time per recomputed token in seconds (used when name=fixed).
   time_per_token: 0.0

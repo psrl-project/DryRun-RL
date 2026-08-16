@@ -6,7 +6,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from enum import Enum
 
-from ..core.types import Request
+from ..component.rollout.engine import Request
 
 
 class CompleteAction(Enum):
@@ -49,8 +49,15 @@ class StalenessPolicy(ABC):
         return CompleteAction.KEEP
 
     @abstractmethod
-    def select_batch(self, st: SimState) -> list[Request] | None:
-        """Return the next training batch, or None if training must wait."""
+    def peek_batch(self, st: SimState) -> list[Request] | None:
+        """Return the next training batch without consuming policy state."""
+
+    def take_batch(self, st: SimState) -> list[Request] | None:
+        """Consume and return the next training batch."""
+        return self.peek_batch(st)
+
+    def on_batch_unavailable(self, st: SimState) -> None:
+        """Called when no training batch is currently available."""
 
     def on_version_advance(self, version: int, st: SimState) -> None:
         """Called after a training step produces a new weight version."""
