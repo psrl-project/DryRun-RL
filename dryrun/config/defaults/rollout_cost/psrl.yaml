@@ -1,0 +1,8 @@
+name: psrl
+artifact_path: ""
+
+parallelism:
+  tp: 1
+  pp: 1
+  dp: 1
+  cp: 1

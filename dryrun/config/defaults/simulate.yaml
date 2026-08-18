@@ -1,9 +1,9 @@
 defaults:
   - _self_
-  - cost_model: roofline
+  - rollout_cost: roofline
   - policy: psrl
   - workload: uniform
-  - train_cost: fixed
+  - training_cost: fixed
 
 # Basic settings of one simulation job.
 job:
@@ -15,9 +15,6 @@ job:
 
   # Maximum allowed staleness of consumed training data.
   max_staleness: 2
-
-  # Prompt length of each request, in tokens.
-  prompt_len: 512
 
 # Rollout engine settings.
 rollout:
@@ -58,6 +55,14 @@ rollout:
 
 # Directory for plots and simulation outputs.
 output_dir: outputs
+
+# Whether to log per-run telemetry (instance/rollout_step/train/request JSONL
+# streams) to output_dir/logs. When false, nothing is written to disk and no
+# plots are generated for this run.
+log_telemetry: true
+
+# Level for the "dryrun" logger (DEBUG, INFO, WARNING, ERROR).
+log_level: INFO
 
 # Weight-sync cost model.
 sync_cost:

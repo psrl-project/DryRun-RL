@@ -3,7 +3,11 @@
 # =========================================================================
 examples/visualization/.*/
 unit_tests/nixl/plot/
-third_party/
+# Ignore cloned checkouts under third_party/, but keep the installer and pins.
+# Use `/*` (not `third_party/`) so files inside can be re-included.
+third_party/*
+!third_party/install.sh
+!third_party/pins.json
 third_party_old/
 third_party_old_2/
 third_party_new/
@@ -153,6 +157,7 @@ instance/
 # =========================================================================
 docs/_build/
 docs/superpowers/
+docs/design
 
 
 # =========================================================================

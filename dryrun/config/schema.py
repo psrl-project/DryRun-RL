@@ -6,7 +6,17 @@ from dataclasses import dataclass, field
 
 
 @dataclass
-class CostModelConfig:
+class ParallelismConfig:
+    """Explicit TP, PP, DP, and CP dimensions."""
+
+    tp: int = 1
+    pp: int = 1
+    dp: int = 1
+    cp: int = 1
+
+
+@dataclass
+class RolloutCostConfig:
     """Rollout inference cost model configuration."""
 
     name: str = "roofline"
@@ -16,8 +26,8 @@ class CostModelConfig:
     A_p: float = 0.0
     A_d: float = 1e-7
     b: int = 16
-    path: str = ""
-    key: str = "TP1_PP1"
+    artifact_path: str = ""
+    parallelism: ParallelismConfig = field(default_factory=ParallelismConfig)
     h: int = 4096
     m: int = 11008
     C1: float = 0.0
@@ -43,8 +53,8 @@ class PolicyConfig:
 
 
 @dataclass
-class WorkloadConfig:
-    """Workload length distribution configuration."""
+class DistributionConfig:
+    """Length distribution configuration for one dimension (prompt or output)."""
 
     name: str = "uniform"
     n: int = 200
@@ -57,18 +67,46 @@ class WorkloadConfig:
     mu: float = 4.0
     sigma: float = 1.0
     alpha: float = 2.0
+    trace_path: str = ""
+    trace_column: str = "length"
 
 
 @dataclass
-class TrainCostConfig:
-    """Training step cost configuration."""
+class WorkloadConfig:
+    """Combined prompt- and output-length workload configuration."""
+
+    output: DistributionConfig = field(default_factory=DistributionConfig)
+    prompt: DistributionConfig = field(
+        default_factory=lambda: DistributionConfig(name="fixed", lo=512, hi=512)
+    )
+
+
+@dataclass
+class TrainingCostConfig:
+    """Training latency, memory, and runtime parallelism configuration."""
 
     name: str = "fixed"
-    train_time: float = 1.0
+    artifact_path: str = ""
+    latency_s: float = 1.0
+    peak_memory_bytes: int = 0
+    parallelism: ParallelismConfig = field(default_factory=ParallelismConfig)
+    micro_batch_size: int = 1
+    schedule: str = "1f1b"
+    activation_recompute: str = "none"
+    optimizer: str = "adam"
+    parameter_dtype: str = "bf16"
+    gradient_dtype: str = "fp32"
+    optimizer_state_dtype: str = "fp32"
+    distributed_optimizer: bool = True
+    allow_extrapolation: bool = False
+    gpu_memory_mib: int | None = None
     model_params: int = 0
     peak_flops: float = 312e12
     memory_bandwidth: float = 2e12
     overhead_factor: float = 1.1
+    bytes_per_parameter: float = 16.0
+    time_per_token: float = 1e-4
+    base_memory_bytes: int = 0
 
 
 @dataclass
@@ -97,7 +135,6 @@ class JobConfig:
     n_versions: int = 20
     batch_size: int = 8
     max_staleness: int = 2
-    prompt_len: int = 512
 
 
 @dataclass
@@ -128,12 +165,14 @@ class RolloutConfig:
 class SimulateConfig:
     """Top-level simulation configuration."""
 
-    cost_model: CostModelConfig = field(default_factory=CostModelConfig)
+    rollout_cost: RolloutCostConfig = field(default_factory=RolloutCostConfig)
     policy: PolicyConfig = field(default_factory=PolicyConfig)
     workload: WorkloadConfig = field(default_factory=WorkloadConfig)
-    train_cost: TrainCostConfig = field(default_factory=TrainCostConfig)
+    training_cost: TrainingCostConfig = field(default_factory=TrainingCostConfig)
     sync_cost: SyncCostConfig = field(default_factory=SyncCostConfig)
     recompute_cost: RecomputeCostConfig = field(default_factory=RecomputeCostConfig)
     job: JobConfig = field(default_factory=JobConfig)
     rollout: RolloutConfig = field(default_factory=RolloutConfig)
     output_dir: str = "outputs"
+    log_telemetry: bool = True
+    log_level: str = "INFO"

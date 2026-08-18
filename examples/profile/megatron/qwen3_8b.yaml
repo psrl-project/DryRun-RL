@@ -1,0 +1,46 @@
+# HuggingFace checkpoint. Architecture fields are read from config.json / AutoConfig.
+model: /apdcephfs_zwfy10_303541817/share_303541817/lhy/models/Qwen3-8B
+
+# gpu_count is the fixed world size. DP = world_size / (TP * PP).
+hardware:
+  gpu_name: H20
+  gpu_count: 8
+  gpu_memory_mib: 97871
+  node_count: 1
+  gpus_per_node: 8
+  interconnect: NVLink
+
+output_dir: ../../../outputs/profile/qwen3_8b/megatron_bridge
+
+training:
+  compute_dtype: bf16
+  optimizer: adam
+  parameter_dtype: bf16
+  gradient_dtype: fp32
+  optimizer_state_dtype: fp32
+  distributed_optimizer: true
+  max_steps: 4
+  warmup_steps: 1
+
+profiling:
+  start_step: 1
+  end_step: 4
+  timer_tag: iteration-time
+  timer_unit: ms
+  allow_incomplete: false
+
+extra_args:
+  - --tokenizer_type
+  - NullTokenizer
+  - ddp.use_distributed_optimizer=true
+
+search_space:
+  tensor_parallel_sizes: [1, 2, 4, 8]
+  pipeline_parallel_sizes: [1, 2, 4]
+  micro_batch_size: 1
+  # Local microbatches per DP rank. GBS = MBS * DP * num_microbatches.
+  # 1 underfills PP. 4 fills PP=4. 8 and 16 cover simulated GBS up to 16 on DP=1
+  # (128 on DP=8). Hydraulis refuses nmb outside the profiled pipeline_slots range.
+  num_microbatches: [1, 4, 8, 16]
+  sequence_lengths: [512, 1024, 2048, 4096]
+  recompute: full

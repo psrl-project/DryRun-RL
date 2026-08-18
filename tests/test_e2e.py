@@ -1,6 +1,11 @@
 """End-to-end simulation tests."""
 
-from dryrun.cost.analytical import UnifiedRoofline
+from dryrun.cost.rollout import UnifiedRoofline
+from dryrun.cost.training import (
+    FixedTrainingLatency,
+    FixedTrainingMemory,
+    TrainingCostModel,
+)
 from dryrun.policy.areal import ArealPolicy
 from dryrun.policy.psrl import PSRLPolicy
 from dryrun.policy.roll import RollPolicy
@@ -12,13 +17,23 @@ from dryrun.workload.distributions import bimodal, uniform
 
 def _run_sim(policy, lengths, cfg):
     cost = UnifiedRoofline(F=0.005, W=0.001, G=0.0001, A_p=0, A_d=1e-7)
-    sim = Simulator(cost=cost, policy=policy, lengths=lengths, cfg=cfg)
+    training_cost = TrainingCostModel(
+        FixedTrainingLatency(0.5),
+        FixedTrainingMemory(0),
+    )
+    sim = Simulator(
+        rollout_cost=cost,
+        training_cost=training_cost,
+        policy=policy,
+        lengths=lengths,
+        cfg=cfg,
+    )
     return sim.run()
 
 
 class TestPSRLBoundHolds:
     def test_uniform_lengths(self):
-        cfg = SimConfig(batch_size=4, max_staleness=2, n_versions=10, train_time=0.5)
+        cfg = SimConfig(batch_size=4, max_staleness=2, n_versions=10)
         lengths = uniform(100, 50, 200, seed=42)
         result = _run_sim(PSRLPolicy(), lengths, cfg)
         assert not result.livelocked
@@ -27,7 +42,7 @@ class TestPSRLBoundHolds:
             assert r.staleness_true() <= cfg.max_staleness
 
     def test_bimodal_lengths(self):
-        cfg = SimConfig(batch_size=4, max_staleness=2, n_versions=8, train_time=0.5)
+        cfg = SimConfig(batch_size=4, max_staleness=2, n_versions=8)
         lengths = bimodal(100, short_len=50, long_len=500, long_frac=0.25, seed=42)
         result = _run_sim(PSRLPolicy(), lengths, cfg)
         assert not result.livelocked
@@ -37,7 +52,7 @@ class TestPSRLBoundHolds:
 
 class TestArealTokenBucket:
     def test_bucket_invariant(self):
-        cfg = SimConfig(batch_size=4, max_staleness=2, n_versions=10, train_time=0.5)
+        cfg = SimConfig(batch_size=4, max_staleness=2, n_versions=10)
         lengths = uniform(100, 50, 100, seed=0)
         result = _run_sim(ArealPolicy(), lengths, cfg)
         assert not result.livelocked
@@ -46,7 +61,7 @@ class TestArealTokenBucket:
 
 class TestRollBound:
     def test_bound_holds_uniform(self):
-        cfg = SimConfig(batch_size=4, max_staleness=2, n_versions=10, train_time=0.5)
+        cfg = SimConfig(batch_size=4, max_staleness=2, n_versions=10)
         lengths = uniform(100, 50, 100, seed=0)
         result = _run_sim(RollPolicy(), lengths, cfg)
         assert not result.livelocked
@@ -60,7 +75,6 @@ class TestSlimeBarrier:
             batch_size=4,
             max_staleness=1,
             n_versions=10,
-            train_time=0.5,
             partial_rollout=False,
         )
         lengths = uniform(100, 50, 100, seed=0)
@@ -73,7 +87,7 @@ class TestSlimeBarrier:
 
 class TestVerlAsync:
     def test_runs_without_crash(self):
-        cfg = SimConfig(batch_size=4, max_staleness=1, n_versions=8, train_time=0.5)
+        cfg = SimConfig(batch_size=4, max_staleness=1, n_versions=8)
         lengths = uniform(100, 50, 100, seed=0)
         policy = VerlPolicy(staleness_threshold=0.1, trigger_parameter_sync_step=2)
         result = _run_sim(policy, lengths, cfg)
@@ -83,7 +97,7 @@ class TestVerlAsync:
 
 class TestDeterminism:
     def test_same_seed_same_result(self):
-        cfg = SimConfig(batch_size=4, max_staleness=2, n_versions=5, train_time=0.3)
+        cfg = SimConfig(batch_size=4, max_staleness=2, n_versions=5)
         lengths = uniform(50, 50, 100, seed=42)
         r1 = _run_sim(PSRLPolicy(), lengths, cfg)
         r2 = _run_sim(PSRLPolicy(), lengths, cfg)
@@ -98,7 +112,6 @@ class TestMultiInstance:
             batch_size=4,
             max_staleness=2,
             n_versions=8,
-            train_time=0.5,
             n_instances=2,
         )
         lengths = uniform(100, 50, 100, seed=0)
@@ -107,3 +120,20 @@ class TestMultiInstance:
         assert result.versions_done == 8
         for r in result.consumed:
             assert r.staleness_true() <= cfg.max_staleness
+
+
+class TestVariablePromptLengths:
+    def test_variable_prompt_lengths(self):
+        prompt_lengths = uniform(100, 100, 1000, seed=7)
+        cfg = SimConfig(
+            batch_size=4,
+            max_staleness=2,
+            n_versions=8,
+            prompt_lengths=prompt_lengths,
+        )
+        lengths = uniform(100, 50, 100, seed=0)
+        result = _run_sim(PSRLPolicy(), lengths, cfg)
+        assert not result.livelocked
+        assert result.versions_done == 8
+        observed_prompt_lens = {r.prompt_len for r in result.consumed}
+        assert len(observed_prompt_lens) > 1

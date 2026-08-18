@@ -1,0 +1,18 @@
+name: distserve
+artifact_path: ""
+
+parallelism:
+  tp: 1
+  pp: 1
+  dp: 1
+  cp: 1
+
+h: 4096
+m: 11008
+C1: 0.0
+C2: 0.0
+C3: 0.001
+C4: 0.0
+C5: 1.0e-13
+b: 16
+F: 0.0

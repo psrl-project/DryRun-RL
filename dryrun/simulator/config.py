@@ -14,9 +14,17 @@ class SimConfig:
     batch_size: int = 8
     max_staleness: int = 1
     n_versions: int = 20
-    train_time: float = 1.0
     sync_time: float = 0.0
     recompute_time: float = 0.0
+    training_tp: int = 1
+    training_pp: int = 1
+    training_dp: int = 1
+    training_cp: int = 1
+    training_micro_batch_size: int = 1
+    training_schedule: str = "1f1b"
+    activation_recompute: str = "none"
+    training_optimizer: str = "adam"
+    training_gpu_memory_bytes: int | None = None
     partial_rollout: bool = True
     token_budget: int = 8192
     kv_blocks: int = 100_000
@@ -26,10 +34,16 @@ class SimConfig:
     reject_if_kv_full: bool = True
     reject_if_waiting: bool = False
     reject_if_running_full: bool = False
-    prompt_len: int = 512
+    prompt_lengths: list[int] = field(default_factory=lambda: [512])
     n_instances: int = 1
     livelock_rounds: int = 50
     max_engine_iters: int = 10_000
+    log_telemetry: bool = True
+    """Whether to log rollout/train/request telemetry via `SimTelemetry`.
+
+    When False, no JSONL files are written even if a `store` is passed to
+    `Simulator`; this takes priority over `store`.
+    """
 
 
 @dataclass
@@ -42,6 +56,7 @@ class SimResult:
     versions_done: int = 0
     livelocked: bool = False
     train_timestamps: list[tuple[float, float]] = field(default_factory=list)
+    train_peak_memory_bytes: list[int] = field(default_factory=list)
 
     @property
     def n_consumed(self) -> int:

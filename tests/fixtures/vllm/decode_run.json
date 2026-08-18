@@ -1,0 +1,15 @@
+{
+  "duration": 0.2,
+  "completed": 2,
+  "failed": 0,
+  "input_lens": [128, 256],
+  "output_lens": [3, 3],
+  "ttfts": [0.010, 0.011],
+  "itls": [[0.005, 0.006], [0.0052, 0.0061]],
+  "start_times": [100.0, 100.0005],
+  "generated_texts": ["abc", "def"],
+  "errors": [null, null],
+  "run_number": 0,
+  "tensor-parallel-size": 1,
+  "pipeline-parallel-size": 1
+}

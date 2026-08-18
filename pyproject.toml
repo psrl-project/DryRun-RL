@@ -15,15 +15,16 @@ dependencies = [
 dev = [
     "pytest>=7.0",
     "pytest-xdist>=3.0",
+    "ruff>=0.12",
 ]
-profile = [
-    "vllm",
-    "aiohttp>=3.8",
-]
+profile = []
 
 [project.scripts]
 dryrun = "dryrun.cli.main:main"
 dryrun-profile = "dryrun.cli.profile:main"
+dryrun-regress = "dryrun.cli.regress:main"
+dryrun-plot = "dryrun.cli.plot:main"
+dryrun-workload = "dryrun.cli.workload:main"
 
 [build-system]
 requires = ["setuptools>=68.0"]

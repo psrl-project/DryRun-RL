@@ -1,0 +1,20 @@
+{
+  "step_times_s": [0.101, 0.099, 0.100],
+  "timers_s": {
+    "forward-backward": [0.090, 0.089, 0.091],
+    "optimizer": [0.010, 0.010, 0.010]
+  },
+  "rank_memory": [
+    {
+      "rank": 0,
+      "allocated_bytes": 1000000000,
+      "reserved_bytes": 1100000000
+    },
+    {
+      "rank": 1,
+      "allocated_bytes": 1050000000,
+      "reserved_bytes": 1150000000
+    }
+  ],
+  "parameter_count": 10000000
+}

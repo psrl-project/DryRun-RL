@@ -6,7 +6,7 @@ accounting, and preemption.
 
 from __future__ import annotations
 
-from ....cost.base import CostModel
+from ....cost.rollout import RolloutCostModel
 from . import advance
 from .event import EngineEvent, EventKind
 from .request import ReqStatus, Request
@@ -23,7 +23,7 @@ class NativeInstance:
 
     def __init__(
         self,
-        cost: CostModel,
+        cost: RolloutCostModel,
         token_budget: int,
         kv_blocks: int,
         block_size: int = 16,
@@ -195,6 +195,10 @@ class NativeInstance:
                 prefill_tokens,
                 self.cost.saturated(n_tokens, t2, ctxsum, n_reqs),
                 steps=1,
+                dt=dt,
+                phase="prefill",
+                # self.t_local is not yet incremented by the caller at this point.
+                t=self.t_local + dt,
             )
         )
 
@@ -327,7 +331,8 @@ class NativeInstance:
             for r in self.running:
                 r.add_tokens(version, k)
                 r.prefilled += k
-            self.t_local += advance.elapsed(F, alpha, beta, k)
+            dt = advance.elapsed(F, alpha, beta, k)
+            self.t_local += dt
             k0 = advance.crossing_step(F, alpha, beta, k_cap=k)
             self.step_stats.append(
                 StepStat(
@@ -337,6 +342,9 @@ class NativeInstance:
                     saturated=k > k0,
                     steps=k,
                     saturated_steps=k - k0,
+                    dt=dt,
+                    phase="decode",
+                    t=self.t_local,
                 )
             )
 
@@ -432,7 +440,8 @@ class NativeInstance:
                 for r in self.running:
                     r.add_tokens(version, k)
                     r.prefilled += k
-                self.t_local += advance.elapsed(F, alpha, beta, k)
+                dt = advance.elapsed(F, alpha, beta, k)
+                self.t_local += dt
                 k0 = advance.crossing_step(F, alpha, beta, k_cap=k)
                 self.step_stats.append(
                     StepStat(
@@ -442,6 +451,9 @@ class NativeInstance:
                         saturated=k > k0,
                         steps=k,
                         saturated_steps=k - k0,
+                        dt=dt,
+                        phase="decode",
+                        t=self.t_local,
                     )
                 )
 

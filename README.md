@@ -1,204 +1,181 @@
 # DryRun-RL
 
-Async disaggregate RL training simulator. Evaluates staleness control policies, GPU allocation strategies, and parallelism configurations without full GPU deployments.
+DryRun-RL is a discrete-event simulator for asynchronous, disaggregated RL training. It models rollout,
+training, weight synchronization, policy staleness, GPU allocation, and parallelism choices without requiring a
+full deployment for every candidate.
 
-## Quick Start
+## Install
 
 ```bash
-# Install the package
-pip install -e .
+# Use conda to manage the environment
+conda create -n dryrun-rl python=3.12
 
-# Run a simulation with PSRL policy (Hydra CLI)
+# Install pinned vLLM and Megatron-Bridge into the current environment
+bash third_party/install.sh
+
+# Install DryRun-RL
+pip install -e ".[dev]"
+```
+
+`third_party/install.sh` reads pins from `third_party/pins.json`, installs the matching PyTorch CUDA
+wheel first, then clones vLLM and Megatron-Bridge under `third_party/` and installs them editable into the
+active conda environment. The source trees are not committed to this repository.
+
+## Simulate
+
+Hydra controls simulation configuration:
+
+```bash
 dryrun policy=psrl job.n_versions=20 rollout.n_instances=4 job.batch_size=8
-
-# Run with bimodal workload
 dryrun policy=areal workload=bimodal job.n_versions=10
-
-# Compare all policies
-for p in psrl areal roll slime verl; do
-    dryrun policy=$p job.n_versions=10 output_dir=outputs/$p
-done
-
-# Hydra multirun sweep
 dryrun --multirun policy=psrl,areal,roll rollout.n_instances=1,2,4
 ```
 
-## Simulation CLI (Hydra)
+The principal configuration groups are:
+
+- `rollout_cost=roofline|psrl|distserve`
+- `training_cost=fixed|linear|analytical|hydraulis`
+- `policy=psrl|areal|roll|slime|verl`
+- `workload=uniform|bimodal|lognormal|powerlaw`
+
+Fitted artifacts use explicit topology:
 
 ```bash
-dryrun [key=value ...]
-
-# Key overrides:
-#   policy=psrl|areal|roll|slime|verl    Staleness control policy
-#   cost_model=roofline|psrl_fitted      Inference cost model
-#   workload=uniform|bimodal|lognormal|powerlaw
-#   train_cost=fixed|analytical          Training cost model
-#   job.n_versions=20                   Training steps to simulate
-#   job.batch_size=8                    Training batch size
-#   job.max_staleness=2                 Maximum allowed staleness
-#   rollout.n_instances=1                Number of rollout instances
-#   output_dir=outputs                   Output directory for plots
-
-# Use a fitted cost model from profiling
-dryrun cost_model=psrl_fitted cost_model.path=cost_models/llama8b.json
-
-# View the resolved config
-dryrun --cfg job
+dryrun \
+  rollout_cost=psrl \
+  rollout_cost.artifact_path=outputs/cost/qwen3_8b/rollout_psrl.json \
+  rollout_cost.parallelism.tp=1 \
+  training_cost=hydraulis \
+  training_cost.artifact_path=outputs/cost/qwen3_8b/training_hydraulis.json \
+  training_cost.parallelism.tp=1 \
+  training_cost.parallelism.pp=1 \
+  training_cost.parallelism.dp=1 \
+  training_cost.micro_batch_size=1
 ```
 
-## Profiling CLI
+View the resolved configuration with `dryrun --cfg job`.
 
-Profile real hardware to build accurate cost models:
+## Profile and regress
+
+Profiling uses YAML workflows and official benchmark entrypoints:
 
 ```bash
-# Profile vLLM decode performance
-dryrun-profile vllm \
-    --model meta-llama/Llama-3-8B \
-    --tp 1 \
-    --batch-sizes 1,2,4,8,16,32 \
-    --ctx-lengths 128,256,512,1024,2048 \
-    --output profiles/llama8b_tp1.csv
+dryrun-profile vllm generate --config examples/profile/vllm/qwen3_8b_tp1.yaml
+dryrun-profile vllm run --config examples/profile/vllm/qwen3_8b_tp1.yaml --dry-run
+dryrun-profile vllm collect --config examples/profile/vllm/qwen3_8b_tp1.yaml
 
-# Profile Megatron training step times
-dryrun-profile megatron \
-    --launch-cmd "torchrun --nproc_per_node=4 train.py" \
-    --batch-sizes 1,2,4,8 \
-    --seq-lengths 512,1024,2048 \
-    --output profiles/llama8b_train.csv
-
-# Fit cost model from profiling data
-dryrun-profile fit \
-    --input profiles/llama8b_tp1.csv \
-    --key TP1_PP1 \
-    --output cost_models/llama8b.json
-
-# Use fitted model in simulation
-dryrun cost_model=psrl_fitted cost_model.path=cost_models/llama8b.json
+dryrun-profile megatron generate --config examples/profile/megatron/qwen3_8b.yaml
+dryrun-profile megatron run --config examples/profile/megatron/qwen3_8b.yaml --index 0 --dry-run
+dryrun-profile megatron collect --config examples/profile/megatron/qwen3_8b.yaml --index 0
 ```
+
+Official raw output is preserved. DryRun-RL writes versioned JSONL as the sole regression input.
+
+Each cost model owns its fitting formula:
+
+```bash
+dryrun-regress rollout \
+  --model psrl \
+  --input outputs/profile/qwen3_8b/vllm_tp1/profiles/vllm.jsonl \
+  --output outputs/cost/qwen3_8b/rollout_psrl.json
+
+dryrun-regress training \
+  --latency-model hydraulis \
+  --memory-model hydraulis \
+  --input outputs/profile/qwen3_8b/megatron_bridge/profiles/megatron_bridge.jsonl \
+  --output outputs/cost/qwen3_8b/training_hydraulis.json
+```
+
+See `examples/profile/`, `examples/regress/`, and
+[`docs/design/profiling-and-cost-models.md`](docs/design/profiling-and-cost-models.md) for coverage requirements,
+formulas, applicability domains, and staged modeling work.
+
+## Cost models
+
+Rollout models:
+
+- Unified roofline fits a low-load floor plus GEMM, prefill attention, and decode attention terms.
+- PSRL fits separate prefill and decode attention and non-attention components.
+- DistServe calibrates effective hardware constants from the same profile records and records single-model
+  identifiability limits.
+
+Training V1 follows the Hydraulis Appendix C decomposition:
+
+```text
+latency = a_q*Q_eff
+        + b_t*T_eff
+        + c_pipeline*(num_microbatches + PP - 1)
+        + update_overhead
+```
+
+Peak memory combines parameter inventory with a fitted activation residual. TP and PP partition model state. DP
+communication is idealized, while distributed optimizer sharding changes gradient and optimizer memory. CP other
+than one, advanced pipeline schedules, and unprofiled discrete cells fail fast.
+
+Artifacts include model and hardware identity, profile digest, explicit parallelism, coefficients, feature ranges,
+grouped holdout metrics, outlier counts, and design rank.
 
 ## Architecture
 
-Layered event-driven simulation with closed-form segment advancement:
+The event loop is:
 
-```
-WorkloadGenerator → Router → RolloutEngine (N instances) → [Recompute] → Trainer → WeightSync
-```
-
-Each decode segment is integrated analytically: `tau(k) = max(F, alpha + beta*k)`. The event queue has O(n_instances) pending completions, not O(total_tokens).
-
-## Cost Models
-
-Two pluggable families with different tradeoffs:
-
-### Analytical Roofline (no hardware needed)
-
-```
-tau = max(F, W + G*n_tokens + A_p*t2/batch + A_d*ctxsum)
+```text
+admit -> generate -> complete -> select batch -> recompute -> train -> sync -> publish
 ```
 
-| Coefficient | Physical meaning | Typical value (A100) |
-|-------------|-----------------|---------------------|
-| **F** | Floor latency (kernel launch + scheduler overhead) | 3-8 ms |
-| **W** | Per-step fixed overhead (sampling, detokenisation) | ~1 ms |
-| **G** | Per-token GEMM cost (QKV + MLP + output projection) | ~0.1 ms/token |
-| **A_p** | Prefill attention cost (O(L²) in chunk length) | model-dependent |
-| **A_d** | Decode attention cost per KV cache token | ~0.1 µs/token |
-| **b** | Prefill block size for chunked prefill | 16 |
+Pure decode segments use closed-form integration of `tau(k) = max(F, alpha + beta*k)`, so simulation cost does not
+grow with every generated token.
 
-### Empirical Fitted (from profiling data)
+Core packages:
 
-```
-tau = attn_b + attn_k*ctxsum + max(other_threshold, other_b + other_k*n_reqs)
-```
-
-| Coefficient | Physical meaning | How it's fitted |
-|-------------|-----------------|----------------|
-| **attn_b** | Base attention overhead (kernel launch, memory alloc) | Stage 2: linear intercept |
-| **attn_k** | Marginal attention cost per context token | Stage 2: linear slope |
-| **other_threshold** | Minimum non-attention latency (roofline knee) | Stage 1: threshold parameter |
-| **other_b** | Base non-attention latency in linear regime | Stage 1: linear intercept |
-| **other_k** | Per-request non-attention cost (GEMM work per request) | Stage 1: linear slope |
-
-The two-stage fitting separates attention (scales with KV cache size) from non-attention (scales with request count) to capture the roofline knee where the GPU transitions from under-utilised to compute-bound.
-
-## Staleness Policies
-
-| Policy | Mechanism | Bound Holds? | Cost |
-|--------|-----------|-------------|------|
-| PSRL | Reserve/Occupy/Consume | Always | Training stall (blocking) |
-| AReaL | Cumulative token bucket | Tail-driven failure | None (no enforcement) |
-| ROLL | Admission + GC discard | Always | Silent data loss |
-| Slime | Loop barrier | Always | Training stall (barrier) |
-| verl | Window + bounded queue | Overflow-driven failure | Oldest dropped |
-
-## Package Structure
-
-```
-dryrun/
-    component/      One subpackage per RL loop stage
-        rollout/    Engine instances (request model, closed-form advance, KV) + router
-        training/   Gradient step cost models
-        sync/       Weight synchronization cost models
-        recompute/  Log-prob recomputation cost models
-    simulator/      Simulation driver (Simulator, SimConfig, SimResult)
-    policy/         5 staleness policies (psrl, areal, roll, slime, verl)
-    cost/           Analytical + empirical inference cost models
-    config/         Hydra structured configs + YAML defaults
-    profiling/      vLLM/Megatron profiling + two-stage regression fitter
-    workload/       Length distribution generators
-    buffer/         Queue data structures
-    viz/            Matplotlib offline plots
-    cli/            Hydra simulation CLI + profiling CLI
-```
-
-## Running Tests
-
-```bash
-source /apdcephfs_zwfy10/share_303541817/lhy/env/dryrun-rl.sh
-python -m pytest tests/ -v
-```
+- `dryrun/component/rollout/` contains request state, continuous batching, KV accounting, and closed-form advance.
+- `dryrun/cost/rollout/` contains roofline, PSRL, and DistServe inference models.
+- `dryrun/cost/training/` contains workload, topology, parameter inventory, and Hydraulis latency and memory models.
+- `dryrun/profiler/` contains the JSONL contract, constrained candidate generation, and official adapters.
+- `dryrun/simulator/` drives the RL loop and emits latency and peak-memory telemetry.
+- `dryrun/telemetry/` writes per-run JSONL streams (`instance`, `rollout_step`, `train`, `request`).
+- `dryrun/visualizer/` renders offline plots from those JSONL streams.
+- `dryrun/policy/` contains PSRL, AReaL, ROLL, Slime, and verl staleness policies.
 
 ## Programmatic API
 
 ```python
-from dryrun.cost.analytical import UnifiedRoofline
+from dryrun.cost.rollout import UnifiedRoofline
+from dryrun.cost.training import (
+    FixedTrainingLatency,
+    FixedTrainingMemory,
+    TrainingCostModel,
+)
 from dryrun.policy.psrl import PSRLPolicy
 from dryrun.simulator import SimConfig, Simulator
 from dryrun.workload.distributions import bimodal
 
-cost = UnifiedRoofline(F=0.005, W=0.001, G=0.0001, A_d=1e-7)
-policy = PSRLPolicy()
+rollout_cost = UnifiedRoofline(F=0.005, W=0.001, G=0.0001, A_d=1e-7)
+training_cost = TrainingCostModel(
+    FixedTrainingLatency(0.5),
+    FixedTrainingMemory(0),
+)
 lengths = bimodal(200, short_len=50, long_len=500, long_frac=0.25, seed=42)
 cfg = SimConfig(batch_size=8, max_staleness=2, n_versions=20, n_instances=4)
 
-sim = Simulator(cost=cost, policy=policy, lengths=lengths, cfg=cfg)
+sim = Simulator(
+    rollout_cost=rollout_cost,
+    training_cost=training_cost,
+    policy=PSRLPolicy(),
+    lengths=lengths,
+    cfg=cfg,
+)
 result = sim.run()
-
-print(f"Throughput: {result.throughput:.1f} tokens/s")
-print(f"Max staleness: {result.max_staleness_true}")
 ```
 
-### Profiling API
+## Verify
 
-```python
-from dryrun.profiling.fit import fit_cost_model, save_fit_result
-from dryrun.cost.empirical import PSRLFitted
+GPU benchmarks and large editable installs are not unit tests. Local static and synthetic checks are:
 
-# Fit from CSV
-result = fit_cost_model("profiles/llama8b_tp1.csv")
-save_fit_result(result, "cost_models/llama8b.json", key="TP1_PP1")
-
-# Load and use
-model = PSRLFitted.from_json("cost_models/llama8b.json", key="TP1_PP1")
-latency = model.step_time(n_tokens=16, t2=0, ctxsum=8000, n_reqs=16)
+```bash
+python -m pytest
+python -m ruff check .
+bash -n third_party/install.sh examples/profile/**/*.sh examples/regress/*.sh
+dryrun-profile --help
+dryrun-regress --help
 ```
-
-## Roadmap
-
-- [ ] Auto-search: binary search over GPU allocation
-- [ ] Routing strategies: throughput_balance, cache_aware
-- [ ] Prefix cache modeling
-- [ ] Multiple rollout model versions (heterogeneous instances)
-- [ ] Elastic scaling during simulation
-- [ ] Online visualization (live dashboard)
-- [ ] Multi-turn / agent environment calls

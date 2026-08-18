@@ -1,0 +1,34 @@
+# Constant training step time and peak memory. Ignores workload and topology.
+name: fixed
+
+# Unused by this model. Fitted models such as hydraulis load coefficients here.
+artifact_path: ""
+
+# Simulated training mesh. Passed into the cost model at predict time.
+# world_size = tp * pp * dp * cp.
+parallelism:
+  tp: 1
+  pp: 1
+  dp: 1
+  cp: 1
+
+# Sequences per microbatch on one DP rank. Splits the global batch.
+micro_batch_size: 1
+
+# Pipeline schedule. V1 only accepts 1f1b.
+schedule: 1f1b
+
+# Activation checkpoint policy. V1 selector for hydraulis; unused by fixed.
+activation_recompute: none
+
+# Optimizer name stamped into the workload descriptor.
+optimizer: adam
+
+# Per-GPU capacity in MiB used by the simulator to flag OOM. null disables the check.
+gpu_memory_mib: null
+
+# Wall-clock training step time in seconds.
+latency_s: 1.0
+
+# Peak reserved memory in bytes. 0 means the simulator never flags OOM from memory.
+peak_memory_bytes: 0

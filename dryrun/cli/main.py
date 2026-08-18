@@ -2,38 +2,65 @@
 
 from __future__ import annotations
 
-import logging
 import os
 from pathlib import Path
 
 import hydra
 from omegaconf import DictConfig
 
+from .._logging import dryrun_logger, setup_logging
 from ..component.recompute.cost import AnalyticalRecomputeCost, FixedRecomputeCost, RecomputeCostModel
 from ..component.sync.cost import BandwidthSyncCost, FixedSyncCost, SyncCostModel
-from ..component.training.cost import AnalyticalTrainCost, FixedTrainCost, TrainCostModel
 from ..config import register_configs
-from ..cost.analytical import UnifiedRoofline
-from ..cost.base import CostModel
-from ..cost.empirical import DistServe, PSRLFitted
+from ..cost.rollout import (
+    ROLLOUT_MODEL_REGISTRY,
+    DistServe,
+    RolloutCostModel,
+    UnifiedRoofline,
+)
+from ..cost.training import (
+    TRAINING_MODEL_REGISTRY,
+    AnalyticalTrainingCost,
+    FixedTrainingCost,
+    LinearTrainingCost,
+    TrainingCostModel,
+    TrainingParallelism,
+)
 from ..policy.areal import ArealPolicy
 from ..policy.base import StalenessPolicy
 from ..policy.psrl import PSRLPolicy
 from ..policy.roll import RollPolicy
 from ..policy.slime import SlimePolicy
 from ..policy.verl import VerlPolicy
+from ..profiler.schema import Parallelism, mib_to_bytes
 from ..simulator import SimConfig, Simulator
-from ..viz.plots import SimPlotter
-from ..workload.distributions import bimodal, lognormal, powerlaw, uniform
-
-dryrun_logger = logging.getLogger("dryrun")
+from ..telemetry.store import JsonlStore
+from ..visualizer.plots import SimPlotter
+from ..workload.distributions import bimodal, fixed, from_trace, lognormal, powerlaw, uniform
 
 register_configs()
 
 
-def build_cost_model(cfg: DictConfig) -> CostModel:
+def _rollout_parallelism(cfg: DictConfig) -> Parallelism:
+    value = cfg.get("parallelism", {})
+    return Parallelism(
+        tp=value.get("tp", 1),
+        pp=value.get("pp", 1),
+        dp=value.get("dp", 1),
+        cp=value.get("cp", 1),
+    )
+
+
+def build_rollout_cost(cfg: DictConfig) -> RolloutCostModel:
     """Instantiate a rollout cost model from config."""
     name = cfg.get("name", "roofline")
+    artifact_path = cfg.get("artifact_path", "")
+    parallelism = _rollout_parallelism(cfg)
+    model_type = ROLLOUT_MODEL_REGISTRY.get(name)
+    if model_type is None:
+        raise ValueError(f"Unknown rollout cost model: {name!r}.")
+    if artifact_path:
+        return model_type.from_artifact(artifact_path, parallelism)
     if name == "roofline":
         return UnifiedRoofline(
             F=cfg.get("F", 0.005),
@@ -41,11 +68,10 @@ def build_cost_model(cfg: DictConfig) -> CostModel:
             G=cfg.get("G", 0.0001),
             A_p=cfg.get("A_p", 0.0),
             A_d=cfg.get("A_d", 1e-7),
+            b=cfg.get("b", 16),
         )
-    if name == "psrl_fitted":
-        path = cfg.get("path", "")
-        assert path, "cost_model.path is required for psrl_fitted."
-        return PSRLFitted.from_json(path, key=cfg.get("key", "TP1_PP1"))
+    if name == "psrl":
+        raise ValueError("rollout_cost.artifact_path is required for psrl.")
     if name == "distserve":
         return DistServe(
             h=cfg.get("h", 4096),
@@ -58,7 +84,7 @@ def build_cost_model(cfg: DictConfig) -> CostModel:
             b=cfg.get("b", 16),
             F=cfg.get("F", 0.0),
         )
-    raise ValueError(f"Unknown cost model: {name!r}.")
+    raise AssertionError(f"Unhandled rollout cost registry entry: {name!r}.")
 
 
 def build_policy(cfg: DictConfig, max_staleness: int) -> StalenessPolicy:
@@ -89,8 +115,8 @@ def build_policy(cfg: DictConfig, max_staleness: int) -> StalenessPolicy:
     raise ValueError(f"Unknown policy: {name!r}.")
 
 
-def build_workload(cfg: DictConfig) -> list[int]:
-    """Generate workload lengths from config."""
+def build_distribution(cfg: DictConfig) -> list[int]:
+    """Generate a list of lengths from a single distribution config."""
     name = cfg.get("name", "uniform")
     n = cfg.get("n", 200)
     seed = cfg.get("seed", 42)
@@ -110,22 +136,68 @@ def build_workload(cfg: DictConfig) -> list[int]:
         return powerlaw(
             n, cfg.get("alpha", 2.0), cfg.get("lo", 10), cfg.get("hi", 1000), seed=seed
         )
-    raise ValueError(f"Unknown workload: {name!r}.")
+    if name == "fixed":
+        return fixed(n, cfg.get("lo", 512), seed=seed)
+    if name == "from_trace":
+        trace_path = cfg.get("trace_path", "")
+        if not trace_path:
+            raise ValueError("workload distribution 'from_trace' requires trace_path.")
+        limit = n or None
+        return from_trace(trace_path, column=cfg.get("trace_column", "length"), limit=limit)
+    raise ValueError(f"Unknown workload distribution: {name!r}.")
 
 
-def build_train_cost(cfg: DictConfig) -> TrainCostModel:
-    """Instantiate a training cost model from config."""
+def build_workload(cfg: DictConfig) -> tuple[list[int], list[int]]:
+    """Generate (prompt_lengths, output_lengths) from workload config."""
+    return build_distribution(cfg.prompt), build_distribution(cfg.output)
+
+
+def build_training_cost(cfg: DictConfig) -> TrainingCostModel:
+    """Instantiate composable training latency and memory models."""
     name = cfg.get("name", "fixed")
     if name == "fixed":
-        return FixedTrainCost(train_time=cfg.get("train_time", 1.0))
+        return FixedTrainingCost(
+            cfg.get("latency_s", 1.0),
+            cfg.get("peak_memory_bytes", 0),
+        )
     if name == "analytical":
-        return AnalyticalTrainCost(
+        return AnalyticalTrainingCost(
             model_params=cfg.get("model_params", 0),
             peak_flops=cfg.get("peak_flops", 312e12),
             memory_bandwidth=cfg.get("memory_bandwidth", 2e12),
             overhead_factor=cfg.get("overhead_factor", 1.1),
+            bytes_per_parameter=cfg.get("bytes_per_parameter", 16.0),
         )
-    raise ValueError(f"Unknown train cost model: {name!r}.")
+    if name == "linear":
+        return LinearTrainingCost(
+            cfg.get("time_per_token", 1e-4),
+            cfg.get("base_memory_bytes", 0),
+        )
+    model_type = TRAINING_MODEL_REGISTRY.get(name)
+    if model_type is not None:
+        artifact_path = cfg.get("artifact_path", "")
+        if not artifact_path:
+            raise ValueError(f"training_cost.artifact_path is required for {name}.")
+        return model_type.from_artifact(
+            artifact_path,
+            parameter_dtype=cfg.get("parameter_dtype", "bf16"),
+            gradient_dtype=cfg.get("gradient_dtype", "fp32"),
+            optimizer_state_dtype=cfg.get("optimizer_state_dtype", "fp32"),
+            distributed_optimizer=cfg.get("distributed_optimizer", True),
+            allow_extrapolation=cfg.get("allow_extrapolation", False),
+        )
+    raise ValueError(f"Unknown training cost model: {name!r}.")
+
+
+def build_training_parallelism(cfg: DictConfig) -> TrainingParallelism:
+    """Build the simulator's explicit training topology."""
+    value = cfg.get("parallelism", {})
+    return TrainingParallelism(
+        tp=value.get("tp", 1),
+        pp=value.get("pp", 1),
+        dp=value.get("dp", 1),
+        cp=value.get("cp", 1),
+    )
 
 
 def build_sync_cost(cfg: DictConfig) -> SyncCostModel:
@@ -156,14 +228,32 @@ def run_simulate(cfg: DictConfig) -> None:
     """Run a simulation from a resolved Hydra config."""
     job = cfg.job
     rollout = cfg.rollout
+    training = cfg.training_cost
+    training_parallelism = build_training_parallelism(training)
     admit = rollout.admission_control
+    log_telemetry = cfg.get("log_telemetry", True)
+
+    output_dir = Path(cfg.output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    setup_logging(level=cfg.get("log_level", "INFO"), log_file=output_dir / "run.log")
+
+    memory_mib = training.get("gpu_memory_mib", None)
+    prompt_lengths, output_lengths = build_workload(cfg.workload)
     sim_cfg = SimConfig(
         batch_size=job.batch_size,
         max_staleness=job.max_staleness,
         n_versions=job.n_versions,
-        train_time=cfg.train_cost.get("train_time", 1.0),
         sync_time=cfg.sync_cost.get("sync_time", 0.0),
         recompute_time=0.0,
+        training_tp=training_parallelism.tp,
+        training_pp=training_parallelism.pp,
+        training_dp=training_parallelism.dp,
+        training_cp=training_parallelism.cp,
+        training_micro_batch_size=training.get("micro_batch_size", 1),
+        training_schedule=training.get("schedule", "1f1b"),
+        activation_recompute=training.get("activation_recompute", "none"),
+        training_optimizer=training.get("optimizer", "adam"),
+        training_gpu_memory_bytes=None if memory_mib is None else mib_to_bytes(int(memory_mib)),
         partial_rollout=rollout.partial_rollout,
         token_budget=rollout.token_budget,
         kv_blocks=rollout.kv_blocks,
@@ -173,31 +263,37 @@ def run_simulate(cfg: DictConfig) -> None:
         reject_if_waiting=admit.get("reject_if_waiting", False),
         reject_if_running_full=admit.get("reject_if_running_full", False),
         n_instances=rollout.n_instances,
-        prompt_len=job.prompt_len,
+        prompt_lengths=prompt_lengths,
         livelock_rounds=rollout.get("livelock_rounds", 50),
         max_engine_iters=rollout.get("max_engine_iters", 10_000),
+        log_telemetry=log_telemetry,
     )
 
-    cost_model = build_cost_model(cfg.cost_model)
+    rollout_cost = build_rollout_cost(cfg.rollout_cost)
     policy = build_policy(cfg.policy, job.max_staleness)
-    lengths = build_workload(cfg.workload)
-    train_cost = build_train_cost(cfg.train_cost)
+    training_cost = build_training_cost(cfg.training_cost)
     sync_cost = build_sync_cost(cfg.sync_cost)
     recompute_cost = build_recompute_cost(cfg.recompute_cost)
 
     dryrun_logger.info(
         f"Starting simulation: policy={policy.name}, n_versions={sim_cfg.n_versions}, "
-        f"n_instances={sim_cfg.n_instances}, batch_size={sim_cfg.batch_size}."
+        f"n_instances={sim_cfg.n_instances}, batch_size={sim_cfg.batch_size}, "
+        f"log_telemetry={log_telemetry}."
     )
 
+    # Only create the logs directory / JSONL files at all when telemetry
+    # logging is switched on; `log_telemetry=False` must not touch disk.
+    store = JsonlStore(output_dir / "logs") if log_telemetry else None
+
     sim = Simulator(
-        cost=cost_model,
+        rollout_cost=rollout_cost,
         policy=policy,
-        lengths=lengths,
+        lengths=output_lengths,
         cfg=sim_cfg,
-        train_cost=train_cost,
+        training_cost=training_cost,
         sync_cost=sync_cost,
         recompute_cost=recompute_cost,
+        store=store,
     )
     result = sim.run()
 
@@ -211,13 +307,16 @@ def run_simulate(cfg: DictConfig) -> None:
     if result.livelocked:
         print("  WARNING: Simulation livelocked!")
 
-    output_dir = Path(cfg.output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
-    plotter = SimPlotter(result, output_dir / "plots")
-    paths = plotter.plot_all()
-    print(f"\n  Plots saved to: {output_dir / 'plots'}")
-    for p in paths:
-        print(f"    {p.name}")
+    if store is not None:
+        plotter = SimPlotter(store, output_dir / "plots")
+        paths = plotter.plot_all()
+        print(f"\n  Logs saved to: {output_dir / 'logs'}")
+        print(f"  Plots saved to: {output_dir / 'plots'}")
+        for p in paths:
+            print(f"    {p.name}")
+        store.close()
+    else:
+        dryrun_logger.info("log_telemetry=False: skipped writing logs and plots.")
 
 
 _CONFIG_PATH = os.path.join(os.path.dirname(__file__), "..", "config", "defaults")

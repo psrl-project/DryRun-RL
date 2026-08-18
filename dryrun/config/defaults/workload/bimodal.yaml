@@ -1,17 +1,32 @@
-# Output-length distribution name.
-name: bimodal
+# Output-length distribution.
+output:
+  name: bimodal
 
-# Number of request lengths to sample.
-n: 200
+  # Number of request lengths to sample.
+  n: 200
 
-# RNG seed.
-seed: 42
+  # RNG seed.
+  seed: 42
 
-# Generated length of the short mode.
-short_len: 50
+  # Generated length of the short mode.
+  short_len: 50
 
-# Generated length of the long mode.
-long_len: 500
+  # Generated length of the long mode.
+  long_len: 500
 
-# Fraction of requests drawn from the long mode.
-long_frac: 0.25
+  # Fraction of requests drawn from the long mode.
+  long_frac: 0.25
+
+# Prompt-length distribution. Defaults to a fixed length for every request.
+prompt:
+  name: fixed
+
+  # Number of request lengths to sample.
+  n: 200
+
+  # RNG seed.
+  seed: 42
+
+  # Fixed prompt length in tokens.
+  lo: 512
+  hi: 512

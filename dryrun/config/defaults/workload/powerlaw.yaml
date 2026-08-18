@@ -1,17 +1,32 @@
-# Output-length distribution name.
-name: powerlaw
+# Output-length distribution.
+output:
+  name: powerlaw
 
-# Number of request lengths to sample.
-n: 200
+  # Number of request lengths to sample.
+  n: 200
 
-# RNG seed.
-seed: 42
+  # RNG seed.
+  seed: 42
 
-# Power-law exponent (larger = more short requests).
-alpha: 2.0
+  # Power-law exponent (larger = more short requests).
+  alpha: 2.0
 
-# Inclusive lower bound of generated tokens.
-lo: 10
+  # Inclusive lower bound of generated tokens.
+  lo: 10
 
-# Inclusive upper bound of generated tokens.
-hi: 1000
+  # Inclusive upper bound of generated tokens.
+  hi: 1000
+
+# Prompt-length distribution. Defaults to a fixed length for every request.
+prompt:
+  name: fixed
+
+  # Number of request lengths to sample.
+  n: 200
+
+  # RNG seed.
+  seed: 42
+
+  # Fixed prompt length in tokens.
+  lo: 512
+  hi: 512

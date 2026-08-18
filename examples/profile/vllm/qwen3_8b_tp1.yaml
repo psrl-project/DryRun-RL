@@ -1,0 +1,62 @@
+# HuggingFace checkpoint. Architecture fields are read from config.json / AutoConfig.
+model: /apdcephfs_zwfy10_303541817/share_303541817/lhy/models/Qwen3-8B
+
+# Hardware fingerprint. gpu_count is overwritten from each sweep point's world_size.
+hardware:
+  gpu_name: H20
+  gpu_count: 1
+  gpu_memory_mib: 97871
+  node_count: 1
+  gpus_per_node: 1
+  interconnect: PCIe
+
+output_dir: ../../../outputs/profile/qwen3_8b/vllm_tp1
+experiment_name: qwen3-8b
+num_runs: 1
+server_ready_timeout: 900
+
+# Concurrent official servers. auto uses all visible GPU slots (world_size each).
+# Set 1 to keep the legacy serial layout. CLI --max-parallel overrides this.
+# Benchmarking runs at max_parallel, but only max_concurrent_startups servers boot at
+# once: parallel imports of torch/vLLM and the checkpoint from CephFS are slow enough to
+# trip server_ready_timeout. Raise it when the checkpoint sits on a fast local disk.
+run:
+  max_parallel: auto
+  max_concurrent_startups: 1
+
+profiling:
+  profiler_args:
+    torch_profiler_use_gzip: true
+
+serve:
+  args:
+    dtype: bfloat16
+    max-model-len: 32768
+    max-num-batched-tokens: 65536
+    gpu-memory-utilization: 0.9
+  parameters:
+    - tensor-parallel-size: 1
+      pipeline-parallel-size: 1
+      max-num-seqs: 64
+
+bench:
+  args:
+    num-prompts: 64
+    request-rate: "inf"
+    random-range-ratio: 0.0
+    seed: 42
+
+# Collect already writes one JSONL record per scheduler iteration, not per grid cell.
+# Prefill is one shot, so the grid must vary prompt length and concurrency.
+# Decode walks context across steps, so one long output per (input, concurrency) is enough.
+phases:
+  prefill:
+    grid:
+      random-input-len: [256, 512, 1024, 2048, 4096, 8192]
+      random-output-len: [1]
+      max-concurrency: [1, 4, 16, 64]
+  decode:
+    grid:
+      random-input-len: [1024, 8192]
+      random-output-len: [4096]
+      max-concurrency: [1, 2, 4, 8, 16, 32, 48, 64]

@@ -1,0 +1,45 @@
+# Roofline training cost: max(compute, memory) * overhead_factor.
+# Compute: 6 * model_params * tokens / (world_size * peak_flops).
+# Memory time: model_bytes / (tp * pp * memory_bandwidth).
+# Peak memory: model_params * bytes_per_parameter / (tp * pp).
+name: analytical
+
+# Unused by this model. Fitted models such as hydraulis load coefficients here.
+artifact_path: ""
+
+# Simulated training mesh. world_size scales compute; tp*pp shards parameters.
+parallelism:
+  tp: 1
+  pp: 1
+  dp: 1
+  cp: 1
+
+# Sequences per microbatch on one DP rank. Splits the global batch.
+micro_batch_size: 1
+
+# Pipeline schedule. V1 only accepts 1f1b.
+schedule: 1f1b
+
+# Activation checkpoint policy. Unused by the analytical memory formula.
+activation_recompute: none
+
+# Optimizer name stamped into the workload descriptor.
+optimizer: adam
+
+# Per-GPU capacity in MiB used by the simulator to flag OOM. null disables the check.
+gpu_memory_mib: null
+
+# Dense parameter count used by both the FLOP and static-memory formulas.
+model_params: 8000000000
+
+# Peak device FLOPS. 312e12 is one H100 BF16 Tensor Core rating.
+peak_flops: 312.0e12
+
+# Peak HBM bandwidth in bytes/s. 2.0e12 is one H100 HBM3 rating.
+memory_bandwidth: 2.0e12
+
+# Multiplier on max(compute_time, memory_time) for unmodeled overhead.
+overhead_factor: 1.1
+
+# Bytes of static state per parameter. 16 covers BF16 weights plus FP32 Adam state.
+bytes_per_parameter: 16.0

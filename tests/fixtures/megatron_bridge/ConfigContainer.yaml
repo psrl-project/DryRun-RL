@@ -1,0 +1,12 @@
+model:
+  tensor_model_parallel_size: 1
+  pipeline_model_parallel_size: 2
+  context_parallel_size: 1
+  seq_length: 512
+train:
+  micro_batch_size: 1
+  global_batch_size: 4
+logger:
+  log_timers_to_tensorboard: true
+ddp:
+  use_distributed_optimizer: true

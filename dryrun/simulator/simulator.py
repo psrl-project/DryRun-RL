@@ -12,9 +12,17 @@ import heapq
 from ..component.recompute.cost import FixedRecomputeCost, RecomputeCostModel
 from ..component.rollout.engine import EngineEvent, EventKind, NativeInstance, ReqStatus, Request
 from ..component.sync.cost import FixedSyncCost, SyncCostModel
-from ..component.training.cost import FixedTrainCost, TrainCostModel
-from ..cost.base import CostModel
+from ..cost.rollout import RolloutCostModel
+from ..cost.training import (
+    FixedTrainingLatency,
+    FixedTrainingMemory,
+    TrainingCostModel,
+    TrainingParallelism,
+    TrainingWorkload,
+)
 from ..policy.base import CompleteAction, SimState, StalenessPolicy
+from ..telemetry.store import JsonlStore
+from ..telemetry.writer import SimTelemetry
 from .config import SimConfig, SimResult
 
 
@@ -28,29 +36,41 @@ class Simulator:
 
     def __init__(
         self,
-        cost: CostModel,
+        rollout_cost: RolloutCostModel,
         policy: StalenessPolicy,
         lengths: list[int],
         cfg: SimConfig,
-        train_cost: TrainCostModel | None = None,
+        training_cost: TrainingCostModel | None = None,
         sync_cost: SyncCostModel | None = None,
         recompute_cost: RecomputeCostModel | None = None,
+        store: JsonlStore | None = None,
     ):
-        self.cost = cost
+        self.rollout_cost = rollout_cost
         self.policy = policy
         self.lengths = list(lengths)
+        self.prompt_lengths = list(cfg.prompt_lengths)
         self.cfg = cfg
-        self.train_cost = train_cost or FixedTrainCost(cfg.train_time)
+        self.training_cost = training_cost or TrainingCostModel(
+            FixedTrainingLatency(1.0),
+            FixedTrainingMemory(0),
+        )
+        self.training_parallelism = TrainingParallelism(
+            tp=cfg.training_tp,
+            pp=cfg.training_pp,
+            dp=cfg.training_dp,
+            cp=cfg.training_cp,
+        )
         self.sync_cost = sync_cost or FixedSyncCost(cfg.sync_time)
+        mean_prompt_len = sum(self.prompt_lengths) / len(self.prompt_lengths)
         self.recompute_cost = recompute_cost or FixedRecomputeCost(
-            cfg.recompute_time / max(1, cfg.batch_size * cfg.prompt_len) if cfg.recompute_time > 0 else 0.0
+            cfg.recompute_time / max(1, cfg.batch_size * mean_prompt_len) if cfg.recompute_time > 0 else 0.0
         )
 
         self.instances: list[NativeInstance] = []
         for i in range(cfg.n_instances):
             self.instances.append(
                 NativeInstance(
-                    cost,
+                    rollout_cost,
                     token_budget=cfg.token_budget,
                     kv_blocks=cfg.kv_blocks,
                     block_size=cfg.block_size,
@@ -74,6 +94,13 @@ class Simulator:
         self.n_admitted: int = 0
         self.n_consumed: int = 0
         self.train_timestamps: list[tuple[float, float]] = []
+        self.train_peak_memory_bytes: list[int] = []
+
+        # `cfg.log_telemetry=False` disables logging even if a `store` was
+        # passed in; see `SimTelemetry` for the stream schemas and the
+        # commit-only bookkeeping (all the logging logic lives there, not
+        # here, so this class only ever calls high-level telemetry methods).
+        self.telemetry = SimTelemetry(store, enabled=cfg.log_telemetry)
 
     def _state(self) -> SimState:
         return SimState(
@@ -92,6 +119,9 @@ class Simulator:
     def _next_length(self) -> int:
         return int(self.lengths[self.next_rid % len(self.lengths)])
 
+    def _next_prompt_length(self) -> int:
+        return int(self.prompt_lengths[self.next_rid % len(self.prompt_lengths)])
+
     def _select_instance(self, req: Request) -> int:
         loads = [inst.n_active for inst in self.instances]
         return loads.index(min(loads))
@@ -104,7 +134,7 @@ class Simulator:
         while admitted < quota:
             req = Request(
                 rid=self.next_rid,
-                prompt_len=self.cfg.prompt_len,
+                prompt_len=self._next_prompt_length(),
                 target_len=self._next_length(),
                 v_traj=self.engine_version,
                 admit_time=self.t,
@@ -118,7 +148,10 @@ class Simulator:
             self.inflight.append(req)
             self.n_admitted += 1
             self.policy.on_admit(req, st)
+            self.telemetry.write_request("admit", self.t, req)
             admitted += 1
+        if admitted:
+            self.telemetry.emit_instance_all(self.instances)
         return admitted
 
     def run(self) -> SimResult:
@@ -155,9 +188,11 @@ class Simulator:
             if req in self.inflight:
                 self.inflight.remove(req)
             # complete_time is already set by _retire via t_local. Do not overwrite.
+            self.telemetry.write_request("complete", self.t, req)
             if self.policy.on_complete(req, st) is CompleteAction.DROP:
                 req.status = ReqStatus.DROPPED
                 self.dropped.append(req)
+                self.telemetry.write_request("drop", self.t, req)
             else:
                 self.ready.append(req)
 
@@ -175,6 +210,7 @@ class Simulator:
                 self.ready.remove(req)
             req.status = ReqStatus.DROPPED
             self.dropped.append(req)
+            self.telemetry.write_request("drop", self.t, req)
         if to_cancel:
             for inst in self.instances:
                 inst.cancel(
@@ -255,6 +291,11 @@ class Simulator:
         events: dict[int, EngineEvent] = {}
         queue: list[tuple[float, int]] = []  # (event_time, instance_id)
 
+        # Telemetry reflects committed state only. Log it here, before any
+        # speculative advance_one_event call below has a chance to mutate
+        # step_stats / occupancy for an event that may still be undone.
+        self.telemetry.sync_all(self.instances)
+
         # Seed: each active instance produces its first event.
         self._seed_events(events, queue)
 
@@ -267,6 +308,7 @@ class Simulator:
             if deadline is not None and t_event > deadline:
                 events[iid] = event
                 self._undo_and_align(events, queue, deadline, force_align_t_local=True)
+                self.telemetry.sync_all(self.instances)
                 break
 
             # --- Cross-instance event: commit on owning instance, align others, re-seed ---
@@ -274,6 +316,7 @@ class Simulator:
                 # event is already committed on inst (at t_event).
                 # Undo all other pending events, advance them to t_event for clock consistency.
                 self._undo_and_align(events, queue, t_event)
+                self.telemetry.sync_all(self.instances)
                 # TODO(lhy): Handle global cross-instance consequence here (e.g. KV rerouting).
                 # Re-seed all instances.
                 self._seed_events(events, queue)
@@ -281,6 +324,7 @@ class Simulator:
 
             # Event is committed. Update global clock.
             self.t = max(self.t, t_event)
+            self.telemetry.sync(inst)
 
             # --- Process completions ---
             if event.kind == EventKind.REQUEST_COMPLETE and event.completed:
@@ -289,6 +333,7 @@ class Simulator:
                 if stop_on_batch:
                     if self.policy.peek_batch(self._state()) is not None:
                         self._undo_and_align(events, queue, t_event)
+                        self.telemetry.sync_all(self.instances)
                         break
 
                     self.policy.on_batch_unavailable(self._state())
@@ -298,7 +343,8 @@ class Simulator:
                 quota = self.policy.admit_quota(self._state())
                 if quota > 0:
                     self._undo_and_align(events, queue, t_event)
-                    self._admit(quota)
+                    self.telemetry.sync_all(self.instances)
+                    self._admit(quota)  # emits instance telemetry itself if it admits anything.
                     self._seed_events(events, queue)
                     continue
 
@@ -316,6 +362,7 @@ class Simulator:
             self._align_instances(deadline, force_align_t_local=True)
         else:
             self._align_instances(self.t, force_align_t_local=False)
+        self.telemetry.sync_all(self.instances)
 
     def _train(self, batch: list[Request]) -> None:
         train_start = self.t
@@ -325,6 +372,7 @@ class Simulator:
                 self.ready.remove(req)
             self.consumed.append(req)
             self.n_consumed += 1
+            self.telemetry.write_request("consume", self.t, req)
 
         self.version += 1
         self.policy.on_version_advance(self.version, self._state())
@@ -333,23 +381,74 @@ class Simulator:
         expired = self.policy.expire(self._state())
         if expired:
             self._discard(expired)
+            self.telemetry.emit_instance_all(self.instances)
 
         if self.cfg.partial_rollout and self.inflight:
             for inst in self.instances:
                 inst.abort_all()
             self.policy.on_abort(list(self.inflight), self._state())
+            self.telemetry.emit_instance_all(self.instances)
 
-        self._admit()
+        self._admit()  # emits instance telemetry itself if it admits anything.
 
-        total_tokens = sum(r.ctx for r in batch)
-        train_time = self.train_cost.step_time(len(batch), total_tokens, 1)
+        sequence_lengths = tuple(req.ctx for req in batch)
+        total_tokens = sum(sequence_lengths)
+        training_workload = TrainingWorkload(
+            sequence_lengths=sequence_lengths,
+            micro_batch_size=self.cfg.training_micro_batch_size,
+            schedule=self.cfg.training_schedule,
+            recompute=self.cfg.activation_recompute,
+            optimizer=self.cfg.training_optimizer,
+        )
+        training_estimate = self.training_cost.estimate(
+            training_workload,
+            self.training_parallelism,
+        )
+        train_time = training_estimate.latency_s
+        peak_memory_bytes = training_estimate.peak_memory_bytes
+        if (
+            self.cfg.training_gpu_memory_bytes is not None
+            and peak_memory_bytes > self.cfg.training_gpu_memory_bytes
+        ):
+            raise RuntimeError(
+                f"Predicted training peak memory {peak_memory_bytes} exceeds configured capacity "
+                f"{self.cfg.training_gpu_memory_bytes}."
+            )
         sync_time = self.sync_cost.sync_time(0, self.cfg.n_instances, 0)
-        recompute_time = self.recompute_cost.recompute_time(len(batch), total_tokens, 1)
+        recompute_time = self.recompute_cost.recompute_time(
+            len(batch),
+            total_tokens,
+            self.training_parallelism.dp,
+        )
 
         total_duration = train_time + sync_time + recompute_time
         deadline = self.t + total_duration
         self._run_engine(deadline=deadline)
         self.train_timestamps.append((train_start, self.t))
+        self.train_peak_memory_bytes.append(peak_memory_bytes)
+        self.telemetry.write_train(
+            t=self.t,
+            start=train_start,
+            end=self.t,
+            version=self.version,
+            batch_size=len(batch),
+            n_reqs=len(batch),
+            total_tokens=total_tokens,
+            train_time=train_time,
+            peak_memory_bytes=peak_memory_bytes,
+            training_tp=self.training_parallelism.tp,
+            training_pp=self.training_parallelism.pp,
+            training_dp=self.training_parallelism.dp,
+            training_cp=self.training_parallelism.cp,
+            micro_batch_size=training_workload.micro_batch_size,
+            schedule=training_workload.schedule,
+            activation_recompute=training_workload.recompute,
+            sync_time=sync_time,
+            recompute_time=recompute_time,
+            n_inflight=len(self.inflight),
+            n_ready=len(self.ready),
+            n_dropped_step=len(expired or []),
+        )
         self.policy.check_invariants(self._state())
 
     def _result(self, livelocked: bool = False) -> SimResult:
@@ -360,4 +459,5 @@ class Simulator:
             versions_done=self.version,
             livelocked=livelocked,
             train_timestamps=self.train_timestamps,
+            train_peak_memory_bytes=self.train_peak_memory_bytes,
         )

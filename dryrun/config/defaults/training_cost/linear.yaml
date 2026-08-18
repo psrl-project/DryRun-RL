@@ -1,0 +1,34 @@
+# Linear training cost: latency = time_per_token * total_tokens.
+# Peak memory = base_memory_bytes / world_size.
+name: linear
+
+# Unused by this model. Fitted models such as hydraulis load coefficients here.
+artifact_path: ""
+
+# Simulated training mesh. world_size = tp * pp * dp * cp divides peak memory.
+parallelism:
+  tp: 1
+  pp: 1
+  dp: 1
+  cp: 1
+
+# Sequences per microbatch on one DP rank. Splits the global batch.
+micro_batch_size: 1
+
+# Pipeline schedule. V1 only accepts 1f1b.
+schedule: 1f1b
+
+# Activation checkpoint policy. Unused by the linear formulas.
+activation_recompute: none
+
+# Optimizer name stamped into the workload descriptor.
+optimizer: adam
+
+# Per-GPU capacity in MiB used by the simulator to flag OOM. null disables the check.
+gpu_memory_mib: null
+
+# Seconds of training step time per global token.
+time_per_token: 1.0e-4
+
+# Peak memory on a single GPU in bytes. Prediction divides by world_size.
+base_memory_bytes: 0
